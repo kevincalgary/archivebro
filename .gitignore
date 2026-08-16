@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+*.log
+.DS_Store
+archives-dev/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+test-results/
+playwright-report/

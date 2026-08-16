@@ -1,0 +1,77 @@
+appId: com.archivebrowser.app
+productName: Archive Browser
+copyright: Copyright © Archive Browser contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - "!node_modules/**/*.md"
+  - "!node_modules/**/test/**"
+  - "!node_modules/**/*.map"
+
+asarUnpack:
+  - "**/*.node"
+
+# better-sqlite3 (the only native dependency) is built on N-API, which is
+# explicitly ABI-stable across Node.js and Electron versions -- unlike
+# older V8-direct native addons, it does NOT need to be rebuilt per
+# Electron version, and it already ships real prebuilt binaries for every
+# platform/arch we target (node_modules/better-sqlite3/prebuilds/*.node,
+# selected at runtime by better-sqlite3's own loader based on
+# process.platform/process.arch). Leaving npmRebuild on forces
+# electron-builder to try a node-gyp rebuild instead of using those
+# prebuilds, which both isn't needed and fails outright when
+# cross-packaging Windows targets from macOS (node-gyp can't cross-compile
+# native modules from source). If a future native dependency needs actual
+# per-ABI rebuilding, this will need to become a real per-OS CI build
+# instead (see .github/workflows/build.yml).
+npmRebuild: false
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  # No entitlements/signing/notarization configured -- see README "Packaging"
+  # section. This produces an unsigned local build only. Pass the CLI
+  # --dir flag (see package:mac in package.json) to skip dmg/zip packing
+  # and just produce a runnable .app for fast local iteration.
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: portable
+      arch: [x64, arm64]
+  # No code-signing certificate configured -- see README "Packaging"
+  # section. This produces an unsigned local build only; Windows
+  # SmartScreen will warn on first run of the unsigned .exe. Pass the CLI
+  # --dir flag (see package:win in package.json) for a fast unpacked build.
+
+linux:
+  target:
+    - target: AppImage
+  category: Network
+
+# Associates .sitearchive with Archive Browser so double-clicking one
+# opens it in the app. On macOS this becomes a CFBundleDocumentTypes entry
+# (delivered to the app via the 'open-file' event); on Windows the NSIS
+# installer registers the extension (delivered via argv / 'second-instance').
+fileAssociations:
+  - ext: sitearchive
+    name: Website Archive
+    description: Archive Browser portable website archive
+    role: Viewer
+    rank: Owner
+    mimeType: application/vnd.archivebrowser.sitearchive
+
+extraMetadata:
+  main: dist/main/index.js

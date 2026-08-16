@@ -1,0 +1,277 @@
+import type Database from 'better-sqlite3';
+import type { ArchiveDetail, ArchiveRecord, CaptureWarning, LibraryPage, LibraryQuery } from '../../shared/types';
+
+interface ArchiveRow {
+  id: string;
+  canonical_url: string;
+  original_url: string;
+  final_url: string;
+  title: string;
+  domain: string;
+  favicon_path: string | null;
+  referrer_url: string | null;
+  captured_at: string;
+  visited_at: string;
+  status: ArchiveRecord['status'];
+  warnings_json: string;
+  size_bytes: number;
+  app_version: string;
+  schema_version: number;
+  tags_json: string;
+  notes: string | null;
+  has_mhtml: number;
+  has_screenshot: number;
+  has_text: number;
+  deleted: number;
+}
+
+function rowToRecord(row: ArchiveRow): ArchiveRecord {
+  return {
+    id: row.id,
+    canonicalUrl: row.canonical_url,
+    originalUrl: row.original_url,
+    finalUrl: row.final_url,
+    title: row.title,
+    domain: row.domain,
+    faviconPath: row.favicon_path,
+    referrerUrl: row.referrer_url,
+    capturedAt: row.captured_at,
+    visitedAt: row.visited_at,
+    status: row.status,
+    warnings: JSON.parse(row.warnings_json) as CaptureWarning[],
+    sizeBytes: row.size_bytes,
+    appVersion: row.app_version,
+    schemaVersion: row.schema_version,
+    tags: JSON.parse(row.tags_json) as string[],
+    notes: row.notes,
+    deleted: row.deleted === 1,
+  };
+}
+
+export interface NewArchiveInput {
+  id: string;
+  canonicalUrl: string;
+  originalUrl: string;
+  finalUrl: string;
+  title: string;
+  domain: string;
+  faviconPath: string | null;
+  referrerUrl: string | null;
+  capturedAt: string;
+  visitedAt: string;
+  status: ArchiveRecord['status'];
+  warnings: CaptureWarning[];
+  sizeBytes: number;
+  appVersion: string;
+  schemaVersion: number;
+  hasMhtml: boolean;
+  hasScreenshot: boolean;
+  hasText: boolean;
+}
+
+export class ArchiveRepo {
+  constructor(private db: Database.Database) {}
+
+  insert(input: NewArchiveInput): void {
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO archives (
+            id, canonical_url, original_url, final_url, title, domain, favicon_path,
+            referrer_url, captured_at, visited_at, status, warnings_json, size_bytes,
+            app_version, schema_version, tags_json, notes, has_mhtml, has_screenshot, has_text, deleted
+          ) VALUES (@id, @canonicalUrl, @originalUrl, @finalUrl, @title, @domain, @faviconPath,
+            @referrerUrl, @capturedAt, @visitedAt, @status, @warningsJson, @sizeBytes,
+            @appVersion, @schemaVersion, @tagsJson, NULL, @hasMhtml, @hasScreenshot, @hasText, 0)`,
+        )
+        .run({
+          ...input,
+          warningsJson: JSON.stringify(input.warnings),
+          tagsJson: JSON.stringify([]),
+          hasMhtml: input.hasMhtml ? 1 : 0,
+          hasScreenshot: input.hasScreenshot ? 1 : 0,
+          hasText: input.hasText ? 1 : 0,
+        });
+      this.db
+        .prepare('INSERT INTO archives_fts (archive_id, title, url, domain, body) VALUES (?, ?, ?, ?, ?)')
+        .run(input.id, input.title, input.finalUrl, input.domain, '');
+    });
+    txn();
+  }
+
+  updateExtractedText(archiveId: string, body: string): void {
+    this.db.prepare('UPDATE archives_fts SET body = ? WHERE archive_id = ?').run(body, archiveId);
+  }
+
+  markHasText(archiveId: string): void {
+    this.db.prepare('UPDATE archives SET has_text = 1 WHERE id = ?').run(archiveId);
+  }
+
+  updateSize(archiveId: string, sizeBytes: number): void {
+    this.db.prepare('UPDATE archives SET size_bytes = ? WHERE id = ?').run(sizeBytes, archiveId);
+  }
+
+  updateStatus(archiveId: string, status: ArchiveRecord['status'], warnings: CaptureWarning[]): void {
+    this.db
+      .prepare('UPDATE archives SET status = ?, warnings_json = ? WHERE id = ?')
+      .run(status, JSON.stringify(warnings), archiveId);
+  }
+
+  getById(archiveId: string): ArchiveDetail | null {
+    const row = this.db.prepare('SELECT * FROM archives WHERE id = ? AND deleted = 0').get(archiveId) as
+      | ArchiveRow
+      | undefined;
+    if (!row) return null;
+    const versionCount = (
+      this.db
+        .prepare('SELECT COUNT(*) as c FROM archives WHERE canonical_url = ? AND deleted = 0')
+        .get(row.canonical_url) as { c: number }
+    ).c;
+    return {
+      ...rowToRecord(row),
+      hasMhtml: row.has_mhtml === 1,
+      hasScreenshot: row.has_screenshot === 1,
+      hasText: row.has_text === 1,
+      versionCount,
+    };
+  }
+
+  getVersions(canonicalUrl: string): ArchiveRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM archives WHERE canonical_url = ? AND deleted = 0 ORDER BY visited_at DESC')
+      .all(canonicalUrl) as ArchiveRow[];
+    return rows.map(rowToRecord);
+  }
+
+  findMostRecentByCanonicalUrl(canonicalUrl: string): ArchiveRecord | null {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM archives WHERE canonical_url = ? AND deleted = 0 AND status = ? ORDER BY visited_at DESC LIMIT 1',
+      )
+      .get(canonicalUrl, 'success') as ArchiveRow | undefined;
+    return row ? rowToRecord(row) : null;
+  }
+
+  query(q: LibraryQuery): LibraryPage {
+    const limit = q.limit ?? 50;
+    const offset = q.offset ?? 0;
+    const clauses: string[] = ['a.deleted = 0'];
+    const params: Record<string, unknown> = {};
+
+    let fromClause = 'FROM archives a';
+    if (q.search && q.search.trim().length > 0) {
+      fromClause = 'FROM archives_fts f JOIN archives a ON a.id = f.archive_id';
+      clauses.push('archives_fts MATCH @search');
+      params.search = ftsQuery(q.search.trim());
+    }
+    if (q.domain) {
+      clauses.push('a.domain = @domain');
+      params.domain = q.domain;
+    }
+    if (q.status) {
+      clauses.push('a.status = @status');
+      params.status = q.status;
+    }
+    if (q.dateFrom) {
+      clauses.push('a.visited_at >= @dateFrom');
+      params.dateFrom = q.dateFrom;
+    }
+    if (q.dateTo) {
+      clauses.push('a.visited_at <= @dateTo');
+      params.dateTo = q.dateTo;
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const orderBy =
+      q.sort === 'oldest'
+        ? 'a.visited_at ASC'
+        : q.sort === 'domain'
+          ? 'a.domain ASC, a.visited_at DESC'
+          : q.sort === 'size'
+            ? 'a.size_bytes DESC'
+            : 'a.visited_at DESC';
+
+    const total = (
+      this.db.prepare(`SELECT COUNT(*) as c ${fromClause} ${where}`).get(params) as { c: number }
+    ).c;
+    const rows = this.db
+      .prepare(`SELECT a.* ${fromClause} ${where} ORDER BY ${orderBy} LIMIT @limit OFFSET @offset`)
+      .all({ ...params, limit, offset }) as ArchiveRow[];
+
+    return { items: rows.map(rowToRecord), total };
+  }
+
+  rename(archiveId: string, title: string): void {
+    this.db.prepare('UPDATE archives SET title = ? WHERE id = ?').run(title, archiveId);
+    this.db.prepare('UPDATE archives_fts SET title = ? WHERE archive_id = ?').run(title, archiveId);
+  }
+
+  setTags(archiveId: string, tags: string[]): void {
+    this.db.prepare('UPDATE archives SET tags_json = ? WHERE id = ?').run(JSON.stringify(tags), archiveId);
+  }
+
+  softDelete(archiveId: string): void {
+    const txn = this.db.transaction(() => {
+      this.db.prepare('UPDATE archives SET deleted = 1 WHERE id = ?').run(archiveId);
+      this.db.prepare('DELETE FROM archives_fts WHERE archive_id = ?').run(archiveId);
+    });
+    txn();
+  }
+
+  listIdsByDomain(domain: string): string[] {
+    const rows = this.db
+      .prepare('SELECT id FROM archives WHERE domain = ? AND deleted = 0')
+      .all(domain) as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  listDistinctDomains(): string[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT domain FROM archives WHERE deleted = 0 ORDER BY domain ASC')
+      .all() as { domain: string }[];
+    return rows.map((r) => r.domain);
+  }
+
+  totalSizeBytes(): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(size_bytes), 0) as s FROM archives WHERE deleted = 0')
+      .get() as { s: number };
+    return row.s;
+  }
+
+  countActive(): number {
+    return (this.db.prepare('SELECT COUNT(*) as c FROM archives WHERE deleted = 0').get() as { c: number }).c;
+  }
+
+  /** Oldest-first, for retention-policy / storage-limit eviction. */
+  listOldestActive(limit: number): ArchiveRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM archives WHERE deleted = 0 ORDER BY visited_at ASC LIMIT ?')
+      .all(limit) as ArchiveRow[];
+    return rows.map(rowToRecord);
+  }
+
+  // --- crash recovery bookkeeping ---
+
+  markCaptureStarted(archiveId: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO interrupted_captures (archive_id, started_at) VALUES (?, ?)')
+      .run(archiveId, new Date().toISOString());
+  }
+
+  markCaptureFinished(archiveId: string): void {
+    this.db.prepare('DELETE FROM interrupted_captures WHERE archive_id = ?').run(archiveId);
+  }
+
+  listInterruptedCaptureIds(): string[] {
+    const rows = this.db.prepare('SELECT archive_id FROM interrupted_captures').all() as { archive_id: string }[];
+    return rows.map((r) => r.archive_id);
+  }
+}
+
+function ftsQuery(raw: string): string {
+  // Quote each token individually so punctuation in the user's search
+  // string can't be interpreted as FTS5 query syntax.
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"*`).join(' ');
+}

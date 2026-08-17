@@ -92,6 +92,12 @@ export interface AppSettings {
   searchEngineUrlTemplate: string; // must contain %s
   screenshotQuality: number; // 0-100, PNG so mostly relevant for future JPEG option
   permissionDefaults: Record<PermissionKind, 'ask' | 'deny' | 'allow'>;
+  /**
+   * Off by default. When on, logs record full URLs instead of just the
+   * origin. Useful for reporting a bug, but it means the log file on disk
+   * contains the addresses of pages visited.
+   */
+  diagnosticLogging: boolean;
 }
 
 export type PermissionKind =

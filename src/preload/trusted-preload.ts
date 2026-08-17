@@ -8,6 +8,7 @@ import type {
   DiskUsageInfo,
   LibraryPage,
   LibraryQuery,
+  PermissionKind,
   TabState,
 } from '../shared/types';
 import type { CaptureProgress, CaptureScope, OpenedSiteArchive } from '../shared/sitearchiveTypes';
@@ -69,6 +70,14 @@ const api = {
     chooseSavePath: (suggestedName: string): Promise<string | null> =>
       ipcRenderer.invoke(Channels.downloadsChooseSavePath, { suggestedName }),
   },
+  permissions: {
+    respond: (input: {
+      requestId: string;
+      allow: boolean;
+      remember?: boolean;
+      permissionKind: PermissionKind;
+    }): Promise<{ resolved: boolean }> => ipcRenderer.invoke(Channels.permissionRespond, input),
+  },
   siteCapture: {
     estimate: (tabId: string): Promise<{ url: string; title: string; host: string; canCapture: boolean; isBusy: boolean }> =>
       ipcRenderer.invoke(Channels.siteCaptureEstimate, { tabId }),
@@ -96,6 +105,9 @@ const api = {
     onCaptureStatus: (cb: (payload: { tabId: string; status: CaptureStatus; archiveId?: string }) => void) =>
       subscribe(Channels.onCaptureStatus, cb),
     onMenuAction: (cb: (action: string) => void) => subscribe<string>(Channels.onMenuAction, cb),
+    onPermissionRequest: (
+      cb: (request: { requestId: string; permission: PermissionKind; origin: string }) => void,
+    ) => subscribe(Channels.onPermissionRequest, cb),
     onSiteCaptureProgress: (cb: (progress: CaptureProgress) => void) =>
       subscribe<CaptureProgress>(Channels.onSiteCaptureProgress, cb),
     onSiteArchiveOpenRequest: (

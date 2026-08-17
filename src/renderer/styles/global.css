@@ -854,3 +854,293 @@ body,
 .tab-sitearchive {
   background: #1e3328;
 }
+
+/* ============================================================
+   Progress affordances (spinner, bars, busy overlays)
+   ============================================================ */
+
+.spinner-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  display: inline-block;
+  border-style: solid;
+  border-color: var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spinner-rotate 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* --- Progress bar --- */
+.progress {
+  width: 100%;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+
+.progress-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.progress-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.progress-track {
+  position: relative;
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  /* Smooth the jumps as discovered/completed counts update. */
+  transition: width 0.35s ease;
+}
+
+.progress-success .progress-fill {
+  background: var(--success);
+}
+
+.progress-danger .progress-fill {
+  background: var(--danger);
+}
+
+.progress-warn .progress-fill {
+  background: var(--warn);
+}
+
+/*
+  Indeterminate: a sweep that never implies a specific percentage, used
+  when the total genuinely isn't known (zipping, opening an archive).
+*/
+.progress-fill-indeterminate {
+  width: 35%;
+  animation: progress-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+/* --- Busy overlay --- */
+.busy-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(30, 30, 30, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  backdrop-filter: blur(2px);
+}
+
+.busy-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 420px;
+  text-align: center;
+}
+
+.busy-message {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.busy-detail {
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+/* --- Inline loading panel --- */
+.loading-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 20px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* --- Animated capture indicator in the toolbar --- */
+.capture-indicator {
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Waiting for the settle delay: a gentle pulse. */
+.capture-pending {
+  animation: capture-pulse 1.4s ease-in-out infinite;
+}
+
+/* Actively writing the archive: a faster, more urgent pulse. */
+.capture-capturing {
+  animation: capture-pulse 0.7s ease-in-out infinite;
+}
+
+@keyframes capture-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+}
+
+/* Success flashes once, then settles -- no permanent motion. */
+.capture-success {
+  animation: capture-pop 0.45s ease-out 1;
+}
+
+@keyframes capture-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.3;
+  }
+  60% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* --- Capture button busy state --- */
+.capture-page-button .spinner {
+  border-color: #fff;
+  border-top-color: transparent;
+}
+
+/* --- Progress dialog additions --- */
+.capture-progress-section {
+  margin: 4px 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.capture-current-spinner {
+  margin-right: 8px;
+}
+
+.capture-elapsed {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live-updating numbers shouldn't reflow as digits change width. */
+.capture-stats dd {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+  Respect the OS "reduce motion" accessibility setting: keep every
+  progress affordance *visible and informative*, but stop it spinning,
+  sweeping, or pulsing. Determinate bars still fill, so real progress is
+  never hidden -- only the decorative motion is removed.
+*/
+@media (prefers-reduced-motion: reduce) {
+  .spinner,
+  .tab-spinner {
+    animation: none;
+    border-top-color: var(--accent);
+    opacity: 0.65;
+  }
+
+  .progress-fill,
+  .progress-fill-indeterminate {
+    animation: none;
+    transition: none;
+  }
+
+  /* An indeterminate bar with no motion becomes a static filled track,
+     which still reads as "busy" without moving. */
+  .progress-fill-indeterminate {
+    width: 100%;
+    opacity: 0.4;
+  }
+
+  .capture-pending,
+  .capture-capturing,
+  .capture-success {
+    animation: none;
+  }
+}
+
+/*
+  A capture in progress is disabled (you can't start a second one), but the
+  generic disabled dimming made it nearly unreadable at exactly the moment
+  the user most wants to see it. Keep the busy state fully legible: full
+  opacity, white label, white spinner.
+*/
+/* Specificity must beat `.toolbar button:disabled`, hence the full selector. */
+.toolbar button.capture-page-button-busy:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+.capture-page-button-busy .spinner-label {
+  color: #fff;
+  font-weight: 600;
+}
+
+.capture-page-button-busy .spinner {
+  border-color: #fff;
+  border-top-color: transparent;
+}
+
+.remove-limits-button {
+  margin-top: 4px;
+  align-self: flex-start;
+  font-size: 12px;
+}

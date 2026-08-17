@@ -7,7 +7,8 @@ import type {
   CaptureResult,
   CaptureScope,
 } from '../../shared/sitearchiveTypes';
-import { SCOPE_HARD_LIMITS } from '../../shared/sitearchiveTypes';
+import { SCOPE_HARD_LIMITS, MIN_FREE_DISK_BYTES } from '../../shared/sitearchiveTypes';
+import { getDiskSpace } from '../capture/diskSpace';
 import { SiteArchiveBuilder } from './archiveWriter';
 import { capturePage, type DiscoveredLink } from './pageCapture';
 import {
@@ -31,7 +32,29 @@ interface QueueItem {
 
 const RESOURCE_TIMEOUT_MS = 20_000;
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
+/**
+ * Per-resource ceiling.
+ *
+ * Responses are buffered in memory before being written, so this bound
+ * multiplied by the asset concurrency is the worst-case peak memory of a
+ * single page's fetch phase. An earlier 512MB media ceiling combined with
+ * 8-way concurrency allowed ~4GB in flight, which killed the process
+ * mid-crawl on a media-heavy site. Media gets a raised-but-bounded cap,
+ * and concurrency is reduced when media is enabled so the product stays
+ * modest (96MB x 3 ~= 288MB worst case).
+ */
 const MAX_RESOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_RESOURCE_BYTES_WITH_MEDIA = 96 * 1024 * 1024;
+/**
+ * Subresources of a single page fetched at once. Browsers routinely open
+ * ~6 connections per host, so this is ordinary load, not aggressive --
+ * and page-to-page politeness is still governed by scope.crawlDelayMs.
+ */
+const ASSET_CONCURRENCY = 8;
+/** Lower when media is on, since each in-flight response can be far larger. */
+const ASSET_CONCURRENCY_WITH_MEDIA = 3;
+/** Rebuild the crawling view this often, to bound renderer memory growth. */
+const PAGES_PER_VIEW_RECYCLE = 20;
 const MAX_REDIRECTS_PER_PAGE = 10;
 
 /**
@@ -152,24 +175,7 @@ export class CaptureJob {
 
     await this.builder.init(app.getPath('temp'));
 
-    // A hidden view so crawling never disturbs the user's actual tab.
-    this.view = new WebContentsView({
-      webPreferences: {
-        session: this.session,
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        webSecurity: true,
-        javascript: true,
-        images: true,
-        offscreen: false,
-      },
-    });
-    this.window.contentView.addChildView(this.view);
-    // Give it a real size so layout/lazy-loading behave like a normal
-    // viewport, but keep it behind the visible UI at zero-ish position.
-    this.view.setBounds({ x: 0, y: 0, width: 1280, height: 900 });
-    this.view.setVisible(false);
+    this.createView();
 
     this.state = 'running';
     const startNormalized = normalizeUrl(this.startUrl);
@@ -185,12 +191,26 @@ export class CaptureJob {
         await this.waitIfPaused();
         if (this.cancelled) break;
 
-        if (this.pagesCompleted >= this.scope.maxPages) {
+        // A null limit means the user explicitly chose "no limit".
+        if (this.scope.maxPages !== null && this.pagesCompleted >= this.scope.maxPages) {
           logger.info('sitearchive.page_limit_reached', { limit: this.scope.maxPages });
           break;
         }
-        if (this.builder.totalBytes >= this.scope.maxTotalBytes) {
+        if (this.scope.maxTotalBytes !== null && this.builder.totalBytes >= this.scope.maxTotalBytes) {
           logger.info('sitearchive.size_limit_reached', {});
+          break;
+        }
+
+        // Disk-space floor, enforced even when every other limit is
+        // unlimited -- "no limit" must never mean "fill the user's drive".
+        if (!(await hasFreeDiskSpace(app.getPath('temp'), MIN_FREE_DISK_BYTES))) {
+          logger.warn('sitearchive.stopped_low_disk', {});
+          this.builder.addFailure({
+            url: this.currentUrl ?? this.startUrl,
+            kind: 'too-large',
+            message: 'Capture stopped: the disk is running out of free space.',
+            discoveredOn: null,
+          });
           break;
         }
 
@@ -200,6 +220,12 @@ export class CaptureJob {
 
         const captured = await this.capturePageSafely(item, startOrigin);
         if (captured?.isStart) startFinalUrl = captured.finalUrl;
+
+        // Periodically rebuild the crawling view so a long, unlimited
+        // crawl doesn't accumulate renderer memory until it's killed.
+        if (this.pagesCompleted > 0 && this.pagesCompleted % PAGES_PER_VIEW_RECYCLE === 0 && this.queue.length > 0) {
+          await this.recycleView();
+        }
 
         // Politeness delay between page loads.
         if (this.scope.crawlDelayMs > 0 && this.queue.length > 0) {
@@ -254,6 +280,49 @@ export class CaptureJob {
       await this.builder.cleanup().catch(() => {});
       this.destroyView();
     }
+  }
+
+  /** A hidden view, so crawling never disturbs the user's actual tab. */
+  private createView(): void {
+    this.view = new WebContentsView({
+      webPreferences: {
+        session: this.session,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        javascript: true,
+        images: true,
+        offscreen: false,
+      },
+    });
+    this.window.contentView.addChildView(this.view);
+    // A real viewport size so layout and lazy-loading behave normally.
+    this.view.setBounds({ x: 0, y: 0, width: 1280, height: 900 });
+    this.view.setVisible(false);
+  }
+
+  /**
+   * Tear the crawling view down and build a fresh one.
+   *
+   * A single renderer navigated through hundreds of media-heavy pages
+   * accumulates memory that never comes back (caches, detached documents,
+   * JS heap growth), and eventually the process is killed mid-crawl --
+   * observed on a real site at ~85 pages. Recycling the view periodically
+   * hands that memory back to the OS. The crawl queue and the archive
+   * builder live outside the view, so nothing captured so far is lost.
+   */
+  private async recycleView(): Promise<void> {
+    logger.info('sitearchive.recycling_view', { pagesCompleted: this.pagesCompleted });
+    this.destroyView();
+    // Let the old renderer process actually go away before starting another.
+    await sleep(500);
+    try {
+      await this.session.clearCache();
+    } catch {
+      // Best effort; a cache clear failing is not worth aborting for.
+    }
+    if (!this.cancelled) this.createView();
   }
 
   private destroyView(): void {
@@ -343,8 +412,9 @@ export class CaptureJob {
           session: this.session,
           scope: this.scope,
           startOrigin,
-          maxResourceBytes: MAX_RESOURCE_BYTES,
+          maxResourceBytes: this.scope.includeMedia ? MAX_RESOURCE_BYTES_WITH_MEDIA : MAX_RESOURCE_BYTES,
           resourceTimeoutMs: RESOURCE_TIMEOUT_MS,
+          assetConcurrency: this.scope.includeMedia ? ASSET_CONCURRENCY_WITH_MEDIA : ASSET_CONCURRENCY,
         },
         {
           originalUrl: item.url,
@@ -361,7 +431,7 @@ export class CaptureJob {
       if (!this.siteTitle) this.siteTitle = result.title;
 
       // Discover further pages, unless we've hit the depth limit.
-      if (item.depth < this.scope.maxDepth) {
+      if (this.scope.maxDepth === null || item.depth < this.scope.maxDepth) {
         this.discoverLinks(result.links, finalUrl, item.depth + 1, startOrigin);
       }
 
@@ -499,6 +569,17 @@ export class CaptureCancelledError extends Error {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * True when at least `required` bytes remain free. If free space can't be
+ * determined we return true rather than blocking the capture -- an
+ * unknown-space platform quirk shouldn't stop archiving from working.
+ */
+async function hasFreeDiskSpace(dir: string, required: number): Promise<boolean> {
+  const info = await getDiskSpace(dir);
+  if (!info) return true;
+  return info.freeBytes > required;
 }
 
 function describe(err: unknown): string {

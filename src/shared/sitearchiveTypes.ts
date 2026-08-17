@@ -20,12 +20,24 @@ export const SITEARCHIVE_EXTENSION = 'sitearchive';
 
 export type CaptureScopeKind = 'current-page' | 'entire-site' | 'custom';
 
+/**
+ * `null` on a limit means "no limit".
+ *
+ * Unlimited is a deliberate, explicit choice the user has to make -- the
+ * presets are all bounded -- because an unbounded crawl of a large site
+ * can run for a very long time and produce a very large file. Pause and
+ * Cancel remain available throughout, and a free-disk-space floor is still
+ * enforced regardless of these settings so an unlimited capture cannot
+ * fill the drive.
+ */
+export type ScopeLimit = number | null;
+
 export interface CaptureScope {
   kind: CaptureScopeKind;
-  /** Max link depth from the starting page. 0 = starting page only. */
-  maxDepth: number;
-  maxPages: number;
-  maxTotalBytes: number;
+  /** Max link depth from the starting page. 0 = starting page only, null = unlimited. */
+  maxDepth: ScopeLimit;
+  maxPages: ScopeLimit;
+  maxTotalBytes: ScopeLimit;
   /** Hostnames allowed in addition to the starting origin's host. */
   allowedDomains: string[];
   /** Explicitly opted-in external domains (assets/pages), beyond allowedDomains. */
@@ -58,6 +70,19 @@ export const DEFAULT_SITE_SCOPE: CaptureScope = {
   maxPages: 50,
 };
 
+/**
+ * "Whole site, no limits" -- reachable from the scope dialog. Every bound
+ * is removed except the non-bypassable free-disk-space floor, so this can
+ * run for a long time on a large site. Pause and Cancel still work.
+ */
+export const UNLIMITED_SITE_SCOPE: CaptureScope = {
+  ...DEFAULT_CAPTURE_SCOPE,
+  kind: 'custom',
+  maxDepth: null,
+  maxPages: null,
+  maxTotalBytes: null,
+};
+
 /** Hard ceilings the UI requires explicit confirmation to exceed. */
 export const SCOPE_SOFT_LIMITS = {
   maxDepth: 5,
@@ -66,12 +91,22 @@ export const SCOPE_SOFT_LIMITS = {
 } as const;
 
 /** Absolute ceilings that cannot be exceeded at all, to bound resource use. */
+/**
+ * Ceilings applied to *finite* values, so a typo like 999999999 pages is
+ * clamped to something sane. Setting a limit to `null` (unlimited) bypasses
+ * these entirely -- that is the escape hatch for capturing a whole large
+ * site. `maxConcurrency` is never bypassable: it protects the target
+ * server, not the user's disk.
+ */
 export const SCOPE_HARD_LIMITS = {
-  maxDepth: 10,
-  maxPages: 2000,
-  maxTotalBytes: 4 * 1024 * 1024 * 1024,
+  maxDepth: 25,
+  maxPages: 50_000,
+  maxTotalBytes: 64 * 1024 * 1024 * 1024,
   maxConcurrency: 6,
 } as const;
+
+/** Free disk space that must remain available; enforced even when unlimited. */
+export const MIN_FREE_DISK_BYTES = 500 * 1024 * 1024;
 
 export interface ArchivedPageEntry {
   pageId: string;

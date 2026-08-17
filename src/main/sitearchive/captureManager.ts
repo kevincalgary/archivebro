@@ -25,13 +25,23 @@ export class CaptureManager {
     return this.activeJob?.jobId ?? null;
   }
 
-  /** Clamp user-supplied scope to the absolute hard limits. */
+  /**
+   * Clamp user-supplied scope to the absolute hard limits.
+   *
+   * `null` means the user explicitly asked for no limit, so it is passed
+   * through untouched -- clamping it would silently re-impose a cap they
+   * deliberately removed. Finite values are still clamped so a typo can't
+   * turn into an accidental multi-day crawl.
+   */
   static clampScope(scope: CaptureScope): CaptureScope {
+    const clamp = (value: number | null, min: number, max: number): number | null =>
+      value === null ? null : Math.max(min, Math.min(value, max));
+
     return {
       ...scope,
-      maxDepth: Math.max(0, Math.min(scope.maxDepth, SCOPE_HARD_LIMITS.maxDepth)),
-      maxPages: Math.max(1, Math.min(scope.maxPages, SCOPE_HARD_LIMITS.maxPages)),
-      maxTotalBytes: Math.max(1024 * 1024, Math.min(scope.maxTotalBytes, SCOPE_HARD_LIMITS.maxTotalBytes)),
+      maxDepth: clamp(scope.maxDepth, 0, SCOPE_HARD_LIMITS.maxDepth),
+      maxPages: clamp(scope.maxPages, 1, SCOPE_HARD_LIMITS.maxPages),
+      maxTotalBytes: clamp(scope.maxTotalBytes, 1024 * 1024, SCOPE_HARD_LIMITS.maxTotalBytes),
       concurrency: Math.max(1, Math.min(scope.concurrency, SCOPE_HARD_LIMITS.maxConcurrency)),
       crawlDelayMs: Math.max(0, Math.min(scope.crawlDelayMs, 10_000)),
       allowedDomains: scope.allowedDomains.slice(0, 100),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ArchiveRecord, LibraryQuery } from '../../../shared/types';
 import ArchiveCard from './ArchiveCard';
 import ArchiveDetail from './ArchiveDetail';
+import { LoadingPanel, Spinner } from '../Progress';
 
 interface Props {
   onOpenLive: () => void;
@@ -78,13 +79,20 @@ export default function LibraryScreen({ onOpenLive }: Props) {
       </div>
 
       <div className="library-meta">
-        {loading ? 'Loading…' : `${total} archived page${total === 1 ? '' : 's'}`}
+        {loading ? (
+          <Spinner size={12} label="Searching archives…" />
+        ) : (
+          `${total} archived page${total === 1 ? '' : 's'}`
+        )}
       </div>
 
       <div className="library-grid">
+        {/* Keep showing the previous results while a new search runs, so
+            the grid doesn't blank out on every keystroke. */}
         {items.map((item) => (
           <ArchiveCard key={item.id} archive={item} onOpen={() => setSelectedId(item.id)} />
         ))}
+        {loading && items.length === 0 && <LoadingPanel message="Searching archives…" />}
         {!loading && items.length === 0 && (
           <div className="library-empty">
             No archives yet. Browse normally and pages will be saved here automatically after a few seconds on each

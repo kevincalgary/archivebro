@@ -472,3 +472,107 @@ test.describe('.sitearchive capture', () => {
     });
   });
 });
+
+test.describe('unlimited scope', () => {
+  test('a capture with every limit removed crawls the whole site and terminates', async () => {
+    await withSiteFixture(async (site) => {
+      await navigateViaAddressBar(handle, `${site.url}/`);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${site.url}/`);
+
+      const out = path.join(outDir, 'Unlimited.sitearchive');
+      const hooks = siteHooks(handle.app);
+      // No depth cap, no page cap, no size cap.
+      await hooks.captureSiteToPath(
+        await activeTabId(),
+        siteScope({ maxDepth: null, maxPages: null, maxTotalBytes: null }),
+        out,
+      );
+      const result = await hooks.awaitCapture();
+
+      expect(result).toBeTruthy();
+      // It must terminate on its own by exhausting the link graph -- the
+      // dedupe/trap logic is what stops an unbounded crawl running forever.
+      const archive = await openSiteArchive(out);
+      try {
+        const urls = archive.manifest.pages.map((p) => p.normalizedUrl);
+        // Deeper than the default depth-3 preset would have reached.
+        expect(urls.some((u) => u.endsWith('/deep/four'))).toBe(true);
+        // And every page is still same-origin.
+        const hosts = new Set(archive.manifest.pages.map((p) => new URL(p.finalUrl).host));
+        expect(hosts.size).toBe(1);
+      } finally {
+        archive.close();
+      }
+    });
+  });
+});
+
+test.describe('durable fallbacks', () => {
+  test('every captured page stores a full-page screenshot and extracted text', async () => {
+    await withSiteFixture(async (site) => {
+      await navigateViaAddressBar(handle, `${site.url}/`);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${site.url}/`);
+
+      const out = path.join(outDir, 'Fallbacks.sitearchive');
+      const hooks = siteHooks(handle.app);
+      await hooks.captureSiteToPath(await activeTabId(), siteScope({ maxDepth: 1, maxPages: 4 }), out);
+      await hooks.awaitCapture();
+
+      const archive = await openSiteArchive(out);
+      try {
+        expect(archive.manifest.pages.length).toBeGreaterThan(0);
+        for (const page of archive.manifest.pages) {
+          // The screenshot and text are the promised durable fallbacks for
+          // when a page cannot be reproduced faithfully -- if they are
+          // silently missing, that promise is broken.
+          expect(page.screenshotPath, `no screenshot for ${page.finalUrl}`).toBeTruthy();
+          expect(page.screenshotSha256).toBeTruthy();
+          expect(page.textPath, `no text for ${page.finalUrl}`).toBeTruthy();
+
+          const png = await archive.readEntry(page.screenshotPath!, page.screenshotSha256);
+          // A real PNG, not a zero-byte placeholder.
+          expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+          expect(png.length).toBeGreaterThan(1000);
+        }
+      } finally {
+        archive.close();
+      }
+    });
+  });
+});
+
+test.describe('long-crawl view recycling', () => {
+  test('a crawl that crosses the view-recycle boundary keeps going and loses nothing', async () => {
+    await withSiteFixture(async (site) => {
+      await navigateViaAddressBar(handle, `${site.url}/`);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${site.url}/`);
+
+      const out = path.join(outDir, 'Recycled.sitearchive');
+      const hooks = siteHooks(handle.app);
+      // The fixture has enough pages to cross the 20-page recycle point,
+      // which tears down and rebuilds the crawling view mid-crawl.
+      await hooks.captureSiteToPath(
+        await activeTabId(),
+        siteScope({ maxDepth: null, maxPages: null, maxTotalBytes: null, crawlDelayMs: 0 }),
+        out,
+      );
+      const result = await hooks.awaitCapture();
+
+      expect(result).toBeTruthy();
+      const archive = await openSiteArchive(out);
+      try {
+        // Pages captured before and after a recycle must all be present
+        // and readable -- the builder outlives the view.
+        expect(archive.manifest.pages.length).toBeGreaterThan(5);
+        for (const page of archive.manifest.pages) {
+          const html = (await archive.readEntry(page.htmlPath, page.htmlSha256)).toString('utf8');
+          expect(html.length).toBeGreaterThan(0);
+        }
+        // And the crawl still terminated cleanly rather than stalling.
+        expect(result!.failures.filter((f) => f.kind === 'render-failed')).toEqual([]);
+      } finally {
+        archive.close();
+      }
+    });
+  });
+});

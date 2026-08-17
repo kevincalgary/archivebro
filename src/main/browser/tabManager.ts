@@ -75,6 +75,16 @@ export class TabManager {
     return this.activeTabId;
   }
 
+  /**
+   * Bounds currently assigned to the active tab's native view. A zero-size
+   * rect means the web page is not covering the window, which is what lets
+   * HTML dialogs actually be seen. Exposed so tests can assert real
+   * occlusion rather than DOM-only visibility.
+   */
+  getContentBounds(): Rectangle {
+    return this.contentBounds;
+  }
+
   /** Current URL/title for a tab, used by the sitearchive capture flow. */
   getTabInfo(tabId: string): { url: string; title: string } | null {
     const tab = this.tabs.get(tabId);

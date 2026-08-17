@@ -16,6 +16,7 @@ import { Channels } from '../shared/ipcContract';
 import { installTestHooks } from './testHooks';
 import { CaptureManager } from './sitearchive/captureManager';
 import { registerArchiveSiteSchemeAsPrivileged, closeAllOpenedArchives } from './sitearchive/sitearchiveSession';
+import { setPermissionPromptEmitter, denyAllPendingPermissions } from './security/permissionPrompts';
 import { SITEARCHIVE_EXTENSION } from '../shared/sitearchiveTypes';
 
 // Must run before app.whenReady().
@@ -74,7 +75,8 @@ async function main(): Promise<void> {
   logger.info('app.starting', { version: app.getVersion(), platform: process.platform });
 
   const settings = new SettingsStore();
-  setDiagnosticLogging(false);
+  // Honour the user's saved choice rather than forcing it off.
+  setDiagnosticLogging(settings.get().diagnosticLogging);
 
   const dbPath = path.join(app.getPath('userData'), 'archive-browser.sqlite3');
   const db = openDatabase(dbPath);
@@ -95,6 +97,17 @@ async function main(): Promise<void> {
   registerIpcHandlers({ mainWindow, tabManager, settings, archiveRepo, captureManager });
   buildAppMenu(mainWindow, tabManager);
   installTestHooks({ archiveRepo, settings, tabManager, captureManager });
+
+  // Route "ask" permission requests to the trusted UI. If the window is
+  // gone there is nothing to ask, and permissionPrompts denies rather than
+  // leaving the page waiting.
+  setPermissionPromptEmitter((request) => {
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onPermissionRequest, request);
+  });
+  mainWindow.on('closed', () => {
+    setPermissionPromptEmitter(null);
+    denyAllPendingPermissions();
+  });
 
   captureManager.onProgress((progress) => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onSiteCaptureProgress, progress);

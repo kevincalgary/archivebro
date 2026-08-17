@@ -86,6 +86,13 @@ export function siteHooks(app: ElectronApplication) {
       app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.resumeCapture()),
     lastCaptureProgress: (): Promise<CaptureProgress | null> =>
       app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.lastCaptureProgress()),
+    /**
+     * The native tab view's bounds. Width/height of 0 means the page is not
+     * covering the window, so an HTML dialog is genuinely visible on screen
+     * -- something DOM-level visibility checks cannot tell you.
+     */
+    contentBounds: (): Promise<{ x: number; y: number; width: number; height: number }> =>
+      app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.tabManager.getContentBounds()),
     openSiteArchivePath: (archivePath: string): Promise<string> =>
       app.evaluate(
         ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.openSiteArchivePath(p),

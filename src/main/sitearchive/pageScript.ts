@@ -313,6 +313,57 @@ export function serializeDomScript(urlMapJson: string, archiveOrigin: string): s
   rewriteAttr(doc.querySelectorAll('source[src]'), 'src');
   rewriteAttr(doc.querySelectorAll('iframe[src], frame[src]'), 'src');
 
+  // --- Cross-origin frames ---
+  // A same-origin frame's content is reachable and gets archived like any
+  // other resource. A cross-origin one cannot be read or safely archived,
+  // so leaving it pointing at the live web would either fail silently or
+  // (worse) look like it should work. Replace it with a clearly marked
+  // placeholder that says what was there, so the gap is visible and
+  // honest rather than a mysterious blank box.
+  try {
+    var liveFrames = document.querySelectorAll('iframe[src], frame[src]');
+    for (var i = 0; i < liveFrames.length; i++) {
+      var lf = liveFrames[i];
+      var srcAttr = lf.getAttribute('src') || '';
+      var absSrc = abs(srcAttr);
+      if (!absSrc) continue;
+
+      var sameOrigin = false;
+      try { sameOrigin = new URL(absSrc).origin === location.origin; } catch (e) { sameOrigin = false; }
+      if (sameOrigin) continue;
+      // Already rewritten into the archive (its content was captured).
+      if (URL_MAP[absSrc]) continue;
+
+      var cf = cloneByUid(lf.getAttribute(UID_ATTR));
+      // Frames aren't in the uid set, so fall back to matching by src.
+      if (!cf) {
+        var candidates = doc.querySelectorAll('iframe, frame');
+        for (var c = 0; c < candidates.length; c++) {
+          var candSrc = candidates[c].getAttribute('data-archive-original-src') || candidates[c].getAttribute('src');
+          if (candSrc && (candSrc === srcAttr || abs(candSrc) === absSrc)) { cf = candidates[c]; break; }
+        }
+      }
+      if (!cf || !cf.parentNode) continue;
+
+      var rect = lf.getBoundingClientRect();
+      var ph = doc.ownerDocument.createElement('div');
+      var host = '';
+      try { host = new URL(absSrc).host; } catch (e) { host = 'another site'; }
+      ph.setAttribute('data-archive-placeholder', 'cross-origin-frame');
+      ph.setAttribute('data-archive-original-src', absSrc);
+      ph.setAttribute(
+        'style',
+        'display:flex;align-items:center;justify-content:center;text-align:center;' +
+          'box-sizing:border-box;padding:12px;border:1px dashed #999;border-radius:4px;' +
+          'background:#f4f4f4;color:#666;font:12px/1.5 sans-serif;' +
+          'width:' + (rect.width > 0 ? Math.round(rect.width) + 'px' : '100%') + ';' +
+          'height:' + (rect.height > 0 ? Math.round(rect.height) + 'px' : '150px') + ';'
+      );
+      ph.textContent = 'Embedded content from ' + host + ' was not archived (it belongs to another site).';
+      cf.parentNode.replaceChild(ph, cf);
+    }
+  } catch (e) {}
+
   // Images: prefer the resolved currentSrc the browser actually used.
   // Paired by uid, so the <img> elements substituted in for canvases
   // above cannot shift this alignment.

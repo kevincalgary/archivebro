@@ -1,4 +1,6 @@
+import { useEffect, useRef, useState } from 'react';
 import type { CaptureProgress } from '../../../shared/sitearchiveTypes';
+import { ProgressBar, Spinner } from '../Progress';
 
 interface Props {
   progress: CaptureProgress;
@@ -24,6 +26,27 @@ const SCOPE_LABEL: Record<string, string> = {
   custom: 'Custom scope',
 };
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
+}
+
+/** Ticks once a second while a capture is running, for the elapsed clock. */
+function useElapsed(running: boolean): number {
+  const startRef = useRef<number>(Date.now());
+  const [, force] = useState(0);
+
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+
+  return Date.now() - startRef.current;
+}
+
 export default function CaptureProgressDialog({
   progress,
   onPause,
@@ -37,6 +60,14 @@ export default function CaptureProgressDialog({
   const isDone = progress.state === 'completed' || progress.state === 'failed' || progress.state === 'cancelled';
   const result = progress.result;
   const revealLabel = navigator.platform.toLowerCase().includes('mac') ? 'Reveal in Finder' : 'Show in File Explorer';
+  const elapsed = useElapsed(!isDone);
+
+  // Progress is measured against pages *discovered so far*, which is the
+  // only honest denominator during a crawl: the total isn't knowable up
+  // front, and discovering new links legitimately makes the bar recede.
+  // Finalizing (zipping + checksums) has no countable unit, so it gets an
+  // indeterminate bar rather than a made-up percentage.
+  const showDeterminate = !isDone && progress.state !== 'finalizing' && progress.pagesDiscovered > 0;
 
   return (
     <div className="dialog-overlay">
@@ -55,6 +86,40 @@ export default function CaptureProgressDialog({
           <div className="capture-target-title">{progress.siteTitle || progress.startUrl}</div>
           <div className="capture-target-url">{progress.startUrl}</div>
           <div className="capture-scope-label">{SCOPE_LABEL[progress.scopeKind] ?? progress.scopeKind}</div>
+        </div>
+
+        {/* One progress section in a fixed position, so the bar doesn't
+            jump around the dialog when the capture finishes. */}
+        <div className="capture-progress-section">
+          {isDone ? (
+            <ProgressBar
+              value={1}
+              total={1}
+              label={
+                progress.state === 'completed' ? 'Finished' : progress.state === 'cancelled' ? 'Cancelled' : 'Stopped'
+              }
+              detail={`${progress.pagesCompleted} page${progress.pagesCompleted === 1 ? '' : 's'} · ${formatDuration(elapsed)}`}
+              variant={progress.state === 'completed' ? 'success' : progress.state === 'failed' ? 'danger' : 'warn'}
+            />
+          ) : (
+            <ProgressBar
+              value={showDeterminate ? progress.pagesCompleted : null}
+              total={showDeterminate ? progress.pagesDiscovered : null}
+              label={
+                progress.state === 'finalizing'
+                  ? 'Writing archive file'
+                  : progress.state === 'paused'
+                    ? 'Paused'
+                    : 'Capturing pages'
+              }
+              detail={
+                showDeterminate
+                  ? `${progress.pagesCompleted} of ${progress.pagesDiscovered} found · ${formatDuration(elapsed)}`
+                  : formatDuration(elapsed)
+              }
+              variant={progress.state === 'paused' ? 'warn' : 'default'}
+            />
+          )}
         </div>
 
         <dl className="capture-stats">
@@ -82,6 +147,7 @@ export default function CaptureProgressDialog({
 
         {!isDone && (
           <div className="capture-current">
+            {progress.state !== 'paused' && <Spinner size={11} className="capture-current-spinner" />}
             <span className="capture-current-label">
               {progress.state === 'paused' ? 'Paused at' : progress.state === 'finalizing' ? 'Finalizing' : 'Now capturing'}
             </span>

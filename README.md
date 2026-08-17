@@ -62,7 +62,11 @@ Click **Capture the Page** in the toolbar (or File ▸ Capture the Page…, `Cmd
 - **Entire current website** — follows links on the same origin, recursively, within safe default limits (depth 3, 50 pages, 256 MB).
 - **Custom scope** — max depth, max pages, max archive size, additional allowed domains, explicitly-included external domains, whether to include documents or audio/video, crawl delay, and concurrency.
 
-Anything beyond the recommended limits requires an explicit confirmation before it will start. During capture you get live pages-discovered / pages-saved / current-URL / downloaded-size / warning / failure counts, plus **Pause** and **Cancel**. On completion you get the saved location, page and asset counts, final file size, a list of anything that failed, and **Open Archive** / **Reveal in Finder** (or **Show in File Explorer**) / **Retry failed pages**.
+**Removing the limits.** In Custom scope, leaving a limit field blank means *no limit*, and a **Remove all limits** button clears all three at once. Unlimited captures require ticking the confirmation, because on a large site they can run a long time and produce a very large file. Two things still hold regardless: **Pause and Cancel work throughout**, and a **free-disk-space floor (500 MB) is enforced and cannot be bypassed** — the capture stops itself and records the reason rather than filling your drive. Finite values are still clamped to sane ceilings (depth 25, 50,000 pages, 64 GB) so a typo can't become an accidental multi-day crawl; only an explicitly blank field is truly unbounded. Request concurrency is never bypassable, since that limit protects the site being captured rather than your disk.
+
+Anything beyond the recommended limits requires an explicit confirmation before it will start. During capture you get a live progress bar, an elapsed clock, and pages-discovered / pages-saved / current-URL / downloaded-size / warning / failure counts, plus **Pause** and **Cancel**.
+
+The bar is measured against *pages discovered so far*, which is the only honest denominator mid-crawl — the true total isn't knowable up front, and finding new links legitimately makes the bar recede. While the archive is being zipped there's no countable unit, so that phase shows an indeterminate bar rather than a fabricated percentage. On completion you get the saved location, page and asset counts, final file size, a list of anything that failed, and **Open Archive** / **Reveal in Finder** (or **Show in File Explorer**) / **Retry failed pages**.
 
 ### The file format
 
@@ -113,6 +117,10 @@ Links are rewritten at serve time (once the crawl's route map is complete, so a 
 
 Captured: rendered HTML and current DOM state, CSS, inline styles, images, favicons, web fonts, SVG, background images, `srcset` resources, same-origin frames, scripts needed for offline display, safe static GET responses, video poster images, the current values of non-sensitive form controls, a full-page screenshot, and extracted searchable text.
 
+**Cross-origin frames** can't be read or safely archived, so rather than leaving a mysterious blank box (or an `<iframe>` still pointing at the live web), they're replaced with a marked placeholder naming the host the content came from. No `<iframe>` in an archived page ever points at a network address; the original URL survives only as an inert provenance attribute.
+
+**Very tall pages** are screenshotted from the top down to 12,000 CSS pixels. Real marketing pages are frequently 20,000–40,000px tall and Chromium simply refuses to rasterize a bitmap that size — a truncated screenshot is far more useful than the silent failure that produced no screenshot at all, and the extracted text still covers the whole page. If the full-page capture fails anyway, a viewport screenshot is used so there is always *some* visual record.
+
 **Never** saved: password-field contents, authentication headers, cookies, session tokens, API keys, payment or autofill data, sensitive hidden fields (CSRF tokens), private keys, or DRM-protected media. Fields whose name/id/autocomplete look credential-shaped are cleared as well, and credential-shaped URLs and content types are skipped outright. The crawl renders pages using your existing logged-in session so authenticated pages look right — but only the rendered output is stored, so a shared archive never carries reusable credentials. This is verified by a test that greps the entire container for the fixture's password and CSRF values.
 
 ### Image screenshot fallback
@@ -130,6 +138,37 @@ Screenshot-derived images only preserve appearance at the displayed resolution. 
 ### What can't be preserved
 
 Perfect offline reproduction is not possible for every website, and the app doesn't claim it. Live search results, server-side forms, real-time feeds, multiplayer/collaborative features, live chat, continuously changing APIs, protected streaming media, DRM content, CAPTCHAs, payment flows, and anything requiring an active server session will not work in an archive. What an archive preserves is the content and navigation available at capture time. The full-page screenshot and extracted text remain available as durable fallbacks for every captured page.
+
+## Progress feedback
+
+Every operation that can take longer than a moment shows motion, so slow work never looks frozen:
+
+| Operation | Feedback |
+|---|---|
+| Page loading in a tab | Spinner in the tab |
+| Automatic background archiving | Toolbar indicator that pulses while pending, pulses faster while writing, pops once on success |
+| Site capture | Determinate progress bar + elapsed clock + live counts + spinner on the current URL; indeterminate bar while zipping; full green bar when finished |
+| Capture button while busy | Inline spinner, kept fully legible rather than dimmed out |
+| Opening a `.sitearchive` | Full-surface busy overlay (it reads and checksum-verifies entries first) |
+| Library search | Spinner; previous results stay visible so the grid doesn't blank on each keystroke |
+| Archive details / Settings | Loading panel instead of an empty screen |
+| Exporting an archive | Spinner on the button while zipping |
+
+Two rules these follow: **never fake a percentage** — if the total isn't knowable, the bar is indeterminate; and **respect `prefers-reduced-motion`** — with that OS setting on, spinners and sweeps stop animating but every bar, count and label stays fully visible, so no information is lost, only the motion.
+
+### Permissions
+
+Websites get nothing by default. Each capability (notifications, geolocation, camera, microphone, MIDI, clipboard-read, display-capture) has a setting of **Deny**, **Allow**, or **Ask**; anything not on that list — USB, serial, HID, window-management — is refused outright with no way to enable it.
+
+**Ask** shows a prompt naming the capability in plain language and the requesting origin (origin only, never a full URL, so a prompt can't leak a path). "Remember this choice" turns the answer into a standing default. There is no path where silence grants anything: an unanswered prompt auto-denies after two minutes, and if no window can display a prompt the request is denied rather than queued.
+
+The pending-request registry lives in the main process with server-generated ids, and the only way to resolve one is the validated `permission:respond` channel from the trusted window. An unknown, stale, or already-used id is ignored, so a reply can't be forged or replayed to grant something that was never asked for.
+
+### A note on dialogs and native views
+
+Tab content is a native `WebContentsView` that the OS composites **on top of** this window's HTML. Any HTML dialog would therefore be painted *underneath* the live web page and be completely invisible, even though it is present and "visible" in the DOM. The app collapses the tab view to zero size whenever a modal is open ([App.tsx](src/renderer/App.tsx) `modalOpen`), which is what actually puts dialogs on screen.
+
+This is worth knowing because DOM-level tests cannot catch a regression here — Playwright's `toBeVisible()` and `page.screenshot()` both ignore native-view occlusion. [tests/e2e/dialog-visibility.spec.ts](tests/e2e/dialog-visibility.spec.ts) asserts against the tab view's real bounds instead, and was confirmed to fail against the buggy version.
 
 ## Project structure
 
@@ -216,11 +255,13 @@ Tabs and the offline archive viewer are `WebContentsView` instances, not separat
 - End-to-end tests drive the **trusted UI** (address bar, tab bar, Library, Settings) exactly as a user would, via Playwright's normal `Page` API against the one real `BrowserWindow`.
 - For assertions that need to reach into a tab's content (e.g. simulating an SPA's `pushState` route change) or into main-process state (the capture catalog, settings, tab list), tests use [`src/main/testHooks.ts`](src/main/testHooks.ts) — a narrow object attached to `globalThis` **only** when `ARCHIVE_BROWSER_E2E=1` is set, reached via Playwright's `electronApplication.evaluate()`. It is never wired to any IPC channel, preload, or `contextBridge`, so it isn't reachable from any renderer or web content, and it doesn't exist at all in a normal run.
 
-Tests run against local fixture websites ([fixtures/](fixtures/)) rather than the real internet. As of this build: **113 unit tests** and **71 end-to-end tests**, all passing (`npm test`).
+Tests run against local fixture websites ([fixtures/](fixtures/)) rather than the real internet, so nothing depends on a third-party site being up.
+
+As of this build: **123 unit tests** and **94 end-to-end tests**, all passing.
 
 **Unit** (`tests/unit`, pure logic): URL resolution/validation and normalization, tracking-parameter stripping, same-origin scope checks, destructive-link and crawler-trap heuristics, atomic writes, path/ID validation, the IPC zod schemas, the SQLite catalog including FTS search and versioning, disk-space checks, settings persistence, domain-exclusion matching, the `.sitearchive` container round-trip, and its rejection of malformed and malicious archives (traversal in every form, zip bombs, bad manifests, checksum mismatches, future format versions).
 
-**End-to-end** (`tests/e2e`, driving the real built app): normal navigation, redirects, SPA routes with debouncing, dynamic content, lazy images, broken resources, multiple tabs, back/forward, `window.open()` popups, capture versioning, domain exclusions, pausing archiving, private browsing, offline viewing, archive deletion, invalid/unsafe address-bar input, restart recovery — plus, for `.sitearchive`: current-page and whole-site capture, relative/absolute/nested links, redirects, cross-origin links never followed, GET-only enforcement, destructive links skipped, recursive loops terminating, depth/page/size limits, asset deduplication, missing resources, lazy-loaded content, JS-generated links, SPA routes, cancelled captures leaving no file or temp data, pause/resume, progress reporting, offline rendering with the server stopped, route-map resolution, checksum-verified asset serving, back/forward inside an archive, corrupt and traversal-crafted archives refused, the full capture UI flow, and every image-fallback case (normal download preferred, canvas, blob URL, broken image, tracking pixel, wrapping link preserved, provenance metadata, deduplication, scroll restoration, private-content exclusion, offline display).
+**End-to-end** (`tests/e2e`, driving the real built app): normal navigation, redirects, SPA routes with debouncing, dynamic content, lazy images, broken resources, multiple tabs, back/forward, `window.open()` popups, capture versioning, domain exclusions, pausing archiving, private browsing, offline viewing, archive deletion, invalid/unsafe address-bar input, restart recovery — plus, for `.sitearchive`: current-page and whole-site capture, relative/absolute/nested links, redirects, cross-origin links never followed, GET-only enforcement, destructive links skipped, recursive loops terminating, depth/page/size limits, asset deduplication, missing resources, lazy-loaded content, JS-generated links, SPA routes, cancelled captures leaving no file or temp data, pause/resume, progress reporting, offline rendering with the server stopped, route-map resolution, checksum-verified asset serving, back/forward inside an archive, corrupt and traversal-crafted archives refused, the full capture UI flow, every image-fallback case (normal download preferred, canvas, blob URL, broken image, tracking pixel, wrapping link preserved, provenance metadata, deduplication, scroll restoration, private-content exclusion, offline display); permission prompting (shown for `ask`, never for `deny`, remembered choices, and that the prompt isn't hidden behind the page); the diagnostic-logging toggle; cross-origin frame placeholders; and that every captured page really does contain a decodable screenshot and extracted text.
 
 Not covered by automated tests in this MVP: actual disk-full behavior (simulated at the unit level via a mocked `fs.statfs` instead — genuinely filling a disk in CI isn't practical), pixel-level screenshot correctness, and Windows-specific behavior (developed and tested on macOS only — see Known Limitations).
 
@@ -256,7 +297,6 @@ Some sites cannot be preserved perfectly: pages that depend on live APIs, server
 
 ## Known limitations
 
-- **"Ask" permission default currently resolves to deny.** There's no in-UI permission-prompt dialog yet; `ask` is accepted in Settings but behaves like `deny` until that prompt ships (see roadmap).
 - **No archive integrity verification on read.** Files aren't hashed at capture time, so on-disk tampering between capture and viewing isn't detected.
 - **MHTML rendering fidelity varies by site.** Pages relying on service workers, streamed media, or heavy runtime JS state may render imperfectly or fail entirely in the offline viewer; the screenshot/text fallback covers this case automatically, but it's a real fidelity gap, not a bug.
 - **SPA "meaningful navigation" detection is a heuristic**, not a guarantee: hash-only changes with an unchanged pathname/search and title are treated as noise. Sites with unusual routing may occasionally under- or over-capture.
@@ -265,9 +305,8 @@ Some sites cannot be preserved perfectly: pages that depend on live APIs, server
 - **No dependency-audit CI step** is wired up yet (`npm audit` is run manually); see roadmap. As of this build, `npm audit` reports 10 advisories (2 critical) — all of them transitive dependencies of **devDependencies only** (`@electron/rebuild`'s `tar`/`make-fetch-happen` chain, and `vitest`'s bundled `esbuild`/`vite`), used at install/build time and never bundled into the packaged app. None are in a runtime dependency (`better-sqlite3`, `react`, `zod`, `archiver`, `zustand`). Still worth fixing before this goes further — `npm audit fix --force` resolves them but pulls in breaking major-version bumps (`vitest@4`, `@electron/rebuild@4`) that weren't re-verified against this codebase in this pass.
 - **Disk-full handling is checked before a capture starts** (a free-space floor via `fs.statfs`), not enforced mid-write via OS-level `ENOSPC` recovery — a capture that starts with enough headroom but hits a suddenly-full disk mid-write will fail that single capture (caught, logged, marked `failed`) rather than crash the app, but isn't retried.
 - **Developed and functionally verified on macOS only.** `npm run dev`, `npm run build`, the full `npm test` suite (82 tests), and both `npm run package:mac` and `package:mac:dist` were actually run in this environment, including launching the packaged `.app` straight off the built `.dmg`. `npm run package:win:dist` was also run here (cross-packaged from macOS — see "Packaging") and produced a valid NSIS installer and portable `.exe`, but neither was *executed*, since no Windows machine was available in this environment. The Windows-specific code paths (accelerator strings, `%LOCALAPPDATA%`-style paths via `app.getPath`) use the same cross-platform Electron APIs exercised on macOS and are expected to work, but that's an expectation, not a verified fact, until someone runs the installer on real Windows.
-- **`.sitearchive` crawling is sequential**, despite the concurrency setting being exposed and validated. Pages are rendered one at a time in a single hidden view; the setting is plumbed through to the scope but does not yet increase parallelism. Crawl delay and all the limits do take effect.
+- **`.sitearchive` pages are crawled one at a time**, despite the concurrency setting being exposed and validated — it's plumbed through to the scope but doesn't yet render pages in parallel. Crawl delay and all the limits do take effect. *Within* a page, subresources are fetched with a bounded parallel pool (8 at a time), which is what makes real sites practical: on landrover.ca that's roughly 7s per page instead of ~50s.
 - **SPA routes that use the History API are captured as the single rendered state** they were in at capture time. Hash routes are captured the same way. The crawler discovers links from the rendered DOM, so JS-created `<a href>` links are followed, but routes reachable only by clicking a JS handler (no real href) are not.
-- **Cross-origin frames are not archived**; only same-origin frames are captured. A cross-origin frame will be blank in the archive rather than showing a screenshot placeholder.
 - **The "not captured" offline page signals its Open Live Version request via `document.title`**, because archived content deliberately has no IPC access. It works and is confirmed before anything opens, but it's a workaround rather than a clean channel.
 - **Retry failed pages re-runs the whole capture** from the same starting point rather than resuming just the failures. This keeps the resulting archive internally consistent instead of stitching two partial crawls together, but it does redo work.
 - **This is an MVP**: unsigned builds only, no auto-update, no accessibility audit performed.
@@ -275,7 +314,6 @@ Some sites cannot be preserved perfectly: pages that depend on live APIs, server
 ## Roadmap (post-MVP, prioritized)
 
 1. **Run the built Windows installer/portable exe on real Windows hardware** and fix whatever that surfaces — the build itself is produced and structurally valid (see Packaging), but has not been executed on Windows (untested in this environment — see Known Limitations).
-2. **Permission-prompt UI** for the `ask` permission default (currently behaves as deny).
 3. **Archive integrity hashing** (content hash recorded at capture time, verified on open) to detect tampering or bit rot.
 4. **Packaged app icons** and proper `build/` resources for macOS/Windows.
 5. **Code signing + notarization** for macOS, code signing for Windows, so builds can be distributed publicly without OS warnings.

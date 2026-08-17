@@ -27,7 +27,6 @@ export const Channels = {
   onTabClosed: 'events:tabClosed',
   onTabActivated: 'events:tabActivated',
   onCaptureStatus: 'events:captureStatus',
-  onDownloadEvent: 'events:downloadEvent',
   onPermissionRequest: 'events:permissionRequest',
   onMenuAction: 'events:menuAction',
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ArchiveDetail as ArchiveDetailType, ArchiveRecord } from '../../../shared/types';
 import { useAppStore } from '../../state/store';
+import { LoadingPanel, Spinner } from '../Progress';
 
 interface Props {
   archiveId: string;
@@ -15,6 +16,7 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
   const [versions, setVersions] = useState<ArchiveRecord[]>([]);
   const [titleDraft, setTitleDraft] = useState('');
   const [tagsDraft, setTagsDraft] = useState('');
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     void window.archiveBrowser.library.getDetail(archiveId).then((d) => {
@@ -27,7 +29,17 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
     });
   }, [archiveId]);
 
-  if (!detail) return null;
+  // Show the panel immediately with a spinner rather than rendering
+  // nothing until the detail query returns.
+  if (!detail) {
+    return (
+      <div className="archive-detail-overlay" onClick={onClose}>
+        <div className="archive-detail" onClick={(e) => e.stopPropagation()}>
+          <LoadingPanel message="Loading archive details…" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="archive-detail-overlay" onClick={onClose}>
@@ -134,7 +146,21 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
             Open live page
           </button>
           <button onClick={() => window.archiveBrowser.library.revealInFolder(detail.id)}>Reveal in folder</button>
-          <button onClick={() => window.archiveBrowser.library.export(detail.id)}>Export…</button>
+          <button
+            disabled={exporting}
+            onClick={async () => {
+              // Exporting zips the archive directory, which is not instant
+              // for a large page -- keep the button visibly busy.
+              setExporting(true);
+              try {
+                await window.archiveBrowser.library.export(detail.id);
+              } finally {
+                setExporting(false);
+              }
+            }}
+          >
+            {exporting ? <Spinner size={11} label="Exporting…" /> : 'Export…'}
+          </button>
           <button
             className="danger"
             onClick={async () => {

@@ -14,8 +14,20 @@ interface Props {
   onStart: (scope: CaptureScope) => void;
 }
 
-function formatMb(bytes: number): number {
-  return Math.round(bytes / (1024 * 1024));
+function formatMb(bytes: number | null): number | '' {
+  return bytes === null ? '' : Math.round(bytes / (1024 * 1024));
+}
+
+/** Blank input === no limit. */
+function parseLimit(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+function describeLimit(value: number | null, unit: string): string {
+  return value === null ? `unlimited ${unit}` : `${value} ${unit}`;
 }
 
 export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel, onStart }: Props) {
@@ -30,21 +42,25 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
         ? { ...DEFAULT_SITE_SCOPE, kind: 'entire-site' }
         : custom;
 
-  // Anything past the soft limits needs an explicit acknowledgement, since
-  // a deep/wide crawl can take a long time and produce a very large file.
+  // Anything past the soft limits -- including removing a limit entirely --
+  // needs an explicit acknowledgement, since a deep/wide crawl can take a
+  // long time and produce a very large file.
+  const isUnlimited = scope.maxDepth === null || scope.maxPages === null || scope.maxTotalBytes === null;
   const exceedsSoftLimits =
-    scope.maxDepth > SCOPE_SOFT_LIMITS.maxDepth ||
-    scope.maxPages > SCOPE_SOFT_LIMITS.maxPages ||
-    scope.maxTotalBytes > SCOPE_SOFT_LIMITS.maxTotalBytes;
+    isUnlimited ||
+    (scope.maxDepth ?? 0) > SCOPE_SOFT_LIMITS.maxDepth ||
+    (scope.maxPages ?? 0) > SCOPE_SOFT_LIMITS.maxPages ||
+    (scope.maxTotalBytes ?? 0) > SCOPE_SOFT_LIMITS.maxTotalBytes;
 
   const canStart = !exceedsSoftLimits || confirmedOverLimit;
 
   const estimate =
     kind === 'current-page'
       ? 'Just this one page.'
-      : `Up to ${scope.maxPages} page${scope.maxPages === 1 ? '' : 's'} on ${host || 'this site'}, ` +
-        `${scope.maxDepth} link${scope.maxDepth === 1 ? '' : 's'} deep, ` +
-        `stopping at ${formatMb(scope.maxTotalBytes)} MB.`;
+      : `${scope.maxPages === null ? 'Every reachable page' : `Up to ${scope.maxPages} page${scope.maxPages === 1 ? '' : 's'}`}` +
+        ` on ${host || 'this site'}, ` +
+        `${scope.maxDepth === null ? 'any number of links' : `${scope.maxDepth} link${scope.maxDepth === 1 ? '' : 's'}`} deep, ` +
+        `${scope.maxTotalBytes === null ? 'with no size limit.' : `stopping at ${formatMb(scope.maxTotalBytes)} MB.`}`;
 
   function patch(p: Partial<CaptureScope>) {
     setCustom((c) => ({ ...c, ...p, kind: 'custom' }));
@@ -92,14 +108,16 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
 
         {kind === 'custom' && (
           <div className="custom-scope">
+            <p className="settings-note">Leave a field blank for no limit.</p>
             <label className="field-row">
               Maximum link depth
               <input
                 type="number"
                 min={0}
-                max={10}
-                value={custom.maxDepth}
-                onChange={(e) => patch({ maxDepth: Number(e.target.value) })}
+                max={25}
+                placeholder="No limit"
+                value={custom.maxDepth ?? ''}
+                onChange={(e) => patch({ maxDepth: parseLimit(e.target.value) })}
               />
             </label>
             <label className="field-row">
@@ -107,9 +125,10 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
               <input
                 type="number"
                 min={1}
-                max={2000}
-                value={custom.maxPages}
-                onChange={(e) => patch({ maxPages: Number(e.target.value) })}
+                max={50000}
+                placeholder="No limit"
+                value={custom.maxPages ?? ''}
+                onChange={(e) => patch({ maxPages: parseLimit(e.target.value) })}
               />
             </label>
             <label className="field-row">
@@ -117,11 +136,33 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
               <input
                 type="number"
                 min={1}
-                max={4096}
+                placeholder="No limit"
                 value={formatMb(custom.maxTotalBytes)}
-                onChange={(e) => patch({ maxTotalBytes: Math.max(1, Number(e.target.value)) * 1024 * 1024 })}
+                onChange={(e) => {
+                  const mb = parseLimit(e.target.value);
+                  patch({ maxTotalBytes: mb === null ? null : Math.max(1, mb) * 1024 * 1024 });
+                }}
               />
             </label>
+            <button
+              type="button"
+              className="remove-limits-button"
+              title="No page, depth or size limit, and include documents, audio and video"
+              onClick={() =>
+                // "Everything" has to mean media too -- audio/video are off
+                // by default, so clearing only the numeric limits would
+                // still silently skip videos.
+                patch({
+                  maxDepth: null,
+                  maxPages: null,
+                  maxTotalBytes: null,
+                  includeDocuments: true,
+                  includeMedia: true,
+                })
+              }
+            >
+              Capture everything (no limits)
+            </button>
             <label className="field-row">
               Additional allowed domains
               <input
@@ -184,9 +225,21 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
         {exceedsSoftLimits && (
           <label className="over-limit-warning">
             <input type="checkbox" checked={confirmedOverLimit} onChange={(e) => setConfirmedOverLimit(e.target.checked)} />
-            This is a large capture (beyond the recommended {SCOPE_SOFT_LIMITS.maxPages} pages /{' '}
-            {SCOPE_SOFT_LIMITS.maxDepth} depth / {formatMb(SCOPE_SOFT_LIMITS.maxTotalBytes)} MB). It may take a long time
-            and produce a very large file. Continue anyway.
+            {isUnlimited ? (
+              <span>
+                You've removed one or more limits ({describeLimit(scope.maxPages, 'pages')},{' '}
+                {describeLimit(scope.maxDepth, 'levels deep')},{' '}
+                {scope.maxTotalBytes === null ? 'unlimited size' : `${formatMb(scope.maxTotalBytes)} MB`}). On a large
+                site this can run for a very long time and produce a very large file. You can pause or cancel at any
+                point, and capture will stop on its own if the disk runs low on space. Continue anyway.
+              </span>
+            ) : (
+              <span>
+                This is a large capture (beyond the recommended {SCOPE_SOFT_LIMITS.maxPages} pages /{' '}
+                {SCOPE_SOFT_LIMITS.maxDepth} depth / {formatMb(SCOPE_SOFT_LIMITS.maxTotalBytes)} MB). It may take a long
+                time and produce a very large file. Continue anyway.
+              </span>
+            )}
           </label>
         )}
 

@@ -41,6 +41,31 @@ export interface PageCaptureContext {
   startOrigin: string;
   maxResourceBytes: number;
   resourceTimeoutMs: number;
+  /** How many subresources of a single page to fetch at once. */
+  assetConcurrency: number;
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, preserving result
+ * order. Rejections are not possible here (fetchResource resolves null on
+ * failure), so one bad resource can never abort the rest.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 interface CollectedResources {
@@ -83,28 +108,44 @@ export async function capturePage(
     const urlMap: Record<string, string> = {};
     const seen = new Set<string>();
 
-    for (const resource of collected.resources) {
-      if (seen.has(resource.url)) continue;
+    // Decide what to fetch first, so the network work is a flat list we can
+    // run in parallel. A real page can reference well over a hundred
+    // resources; fetching them one at a time made a single page take tens
+    // of seconds on a large site.
+    const wanted = collected.resources.filter((resource) => {
+      if (seen.has(resource.url)) return false;
       seen.add(resource.url);
+      // Respect the user's scope choices for heavy content types.
+      if (!ctx.scope.includeMedia && (resource.kind === 'media' || isMediaUrl(resource.url))) return false;
+      if (!ctx.scope.includeDocuments && isDocumentUrl(resource.url)) return false;
+      return true;
+    });
 
-      if (ctx.builder.totalBytes + bytesDownloaded > ctx.scope.maxTotalBytes) {
+    // Assets may come from a CDN on another host, which is normal and
+    // expected -- but only for assets, never for crawled pages.
+    // Browsers open several connections per host as a matter of course, so
+    // a small bounded pool here is ordinary behaviour rather than
+    // aggressive: page-level politeness is still governed by crawlDelayMs.
+    const fetched = await mapWithConcurrency(wanted, ctx.assetConcurrency, (resource) =>
+      fetchResource(resource.url, {
+        session: ctx.session,
+        maxBytes: ctx.maxResourceBytes,
+        timeoutMs: ctx.resourceTimeoutMs,
+      }),
+    );
+
+    // Apply results in the original order so the archive is byte-stable
+    // regardless of the order responses happened to come back in.
+    for (let i = 0; i < wanted.length; i += 1) {
+      const resource = wanted[i]!;
+      const response = fetched[i];
+
+      if (ctx.scope.maxTotalBytes !== null && ctx.builder.totalBytes + bytesDownloaded > ctx.scope.maxTotalBytes) {
         warnings.push('Archive size limit reached; some resources were skipped.');
         break;
       }
 
-      // Respect the user's scope choices for heavy content types.
-      if (!ctx.scope.includeMedia && (resource.kind === 'media' || isMediaUrl(resource.url))) continue;
-      if (!ctx.scope.includeDocuments && isDocumentUrl(resource.url)) continue;
-
-      // Assets may come from a CDN on another host, which is normal and
-      // expected -- but only for assets, never for crawled pages.
-      const fetched = await fetchResource(resource.url, {
-        session: ctx.session,
-        maxBytes: ctx.maxResourceBytes,
-        timeoutMs: ctx.resourceTimeoutMs,
-      });
-
-      if (!fetched) {
+      if (!response) {
         // Images that fail here become screenshot-fallback candidates,
         // which the serialize step marks and we handle below.
         ctx.builder.addFailure({
@@ -116,8 +157,8 @@ export async function capturePage(
         continue;
       }
 
-      const asset = await ctx.builder.addAsset(fetched.body, fetched.contentType, resource.url);
-      bytesDownloaded += fetched.body.length;
+      const asset = await ctx.builder.addAsset(response.body, response.contentType, resource.url);
+      bytesDownloaded += response.body.length;
       urlMap[resource.url] = asset.path;
 
       const normalized = normalizeUrl(resource.url);

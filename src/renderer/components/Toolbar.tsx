@@ -2,6 +2,7 @@ import { useEffect, useState, type RefObject } from 'react';
 import type { TabState } from '../../shared/types';
 import type { Screen } from '../state/store';
 import CaptureIndicator from './CaptureIndicator';
+import { Spinner } from './Progress';
 
 interface Props {
   tab: TabState | null;
@@ -93,12 +94,12 @@ export default function Toolbar({
       </form>
 
       <button
-        className="capture-page-button"
+        className={`capture-page-button ${captureBusy ? 'capture-page-button-busy' : ''}`}
         onClick={onCapturePage}
         disabled={!tab || tab.isOffline || captureBusy || !/^https?:/i.test(tab?.url ?? '')}
         title="Save this page or the whole website as a portable offline archive"
       >
-        {captureBusy ? 'Capturing…' : 'Capture the Page'}
+        {captureBusy ? <Spinner size={11} label="Capturing…" /> : 'Capture the Page'}
       </button>
 
       {tab && !tab.isOffline && <CaptureIndicator status={tab.lastCaptureStatus} paused={tab.isArchivingPaused} />}

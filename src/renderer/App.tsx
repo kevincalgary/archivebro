@@ -7,6 +7,8 @@ import LibraryScreen from './components/Library/LibraryScreen';
 import SettingsScreen from './components/Settings/SettingsScreen';
 import CaptureScopeDialog from './components/Capture/CaptureScopeDialog';
 import CaptureProgressDialog from './components/Capture/CaptureProgressDialog';
+import { BusyOverlay } from './components/Progress';
+import PermissionPrompt, { type PermissionRequest } from './components/PermissionPrompt';
 import type { CaptureProgress, CaptureScope } from '../shared/sitearchiveTypes';
 
 export default function App() {
@@ -17,15 +19,27 @@ export default function App() {
   // --- Portable .sitearchive capture state ---
   const [scopeDialog, setScopeDialog] = useState<{ url: string; title: string; host: string } | null>(null);
   const [captureProgress, setCaptureProgress] = useState<CaptureProgress | null>(null);
-  const [captureJobId, setCaptureJobId] = useState<string | null>(null);
+
+  // Opening an archive reads and checksum-verifies entries out of the ZIP
+  // before anything can render, which is not instant for a large one --
+  // so it gets a visible busy state rather than appearing to do nothing.
+  const [openingArchive, setOpeningArchive] = useState<string | null>(null);
+
+  // Queue rather than a single slot: a page can request several
+  // permissions at once, and each must get its own explicit answer.
+  const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
+  const permissionRequest = permissionQueue[0] ?? null;
 
   const openArchivePath = useCallback(async (archivePath: string) => {
+    setOpeningArchive(archivePath);
     try {
       await window.archiveBrowser.siteArchive.openPath(archivePath);
       setCaptureProgress(null);
       setScreen('browser');
     } catch {
       // The main process already showed a specific error dialog.
+    } finally {
+      setOpeningArchive(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -84,6 +98,10 @@ export default function App() {
       setCaptureProgress(progress);
     });
 
+    const offPermission = window.archiveBrowser.events.onPermissionRequest((request) => {
+      setPermissionQueue((q) => [...q, request]);
+    });
+
     // Requests that originate inside an archived page (which has no IPC
     // access): opening the live version, an external link, or a
     // double-clicked .sitearchive file.
@@ -103,6 +121,7 @@ export default function App() {
       offTabActivated();
       offMenu();
       offCaptureProgress();
+      offPermission();
       offArchiveRequest();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,6 +135,11 @@ export default function App() {
   }, [tabs, activeTabId, setActiveTabId]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+
+  // Anything that renders an HTML overlay must hide the native tab view,
+  // or it will be painted over. Keep this list in sync with the overlays
+  // rendered at the bottom of this component.
+  const modalOpen = Boolean(scopeDialog || captureProgress || openingArchive || permissionRequest);
 
   return (
     <div className="app-shell">
@@ -176,10 +200,41 @@ export default function App() {
         {/* BrowserSurface is always mounted so its ResizeObserver keeps
             reporting bounds, but it only claims screen space (and the
             WebContentsView only becomes visible) while screen === 'browser'. */}
-        <BrowserSurface active={screen === 'browser'} />
+        {/*
+          Tab content is a native WebContentsView composited ON TOP of this
+          window's HTML, so any HTML modal would be hidden behind the live
+          page. Collapsing the surface to zero size while a modal is open is
+          what actually makes dialogs visible to the user.
+        */}
+        <BrowserSurface active={screen === 'browser' && !modalOpen} />
         {screen === 'library' && <LibraryScreen onOpenLive={() => setScreen('browser')} />}
         {screen === 'settings' && <SettingsScreen />}
+
+        {openingArchive && (
+          <BusyOverlay
+            message="Opening website archive…"
+            detail={`Verifying contents of ${openingArchive.split('/').pop()}`}
+          />
+        )}
       </div>
+
+      {permissionRequest && (
+        <PermissionPrompt
+          key={permissionRequest.requestId}
+          request={permissionRequest}
+          onRespond={async (allow, remember) => {
+            // Drop it from the queue first so the next prompt (if any)
+            // appears immediately and can't be double-answered.
+            setPermissionQueue((q) => q.filter((r) => r.requestId !== permissionRequest.requestId));
+            await window.archiveBrowser.permissions.respond({
+              requestId: permissionRequest.requestId,
+              allow,
+              remember,
+              permissionKind: permissionRequest.permission,
+            });
+          }}
+        />
+      )}
 
       {scopeDialog && (
         <CaptureScopeDialog
@@ -190,8 +245,9 @@ export default function App() {
           onStart={async (scope: CaptureScope) => {
             setScopeDialog(null);
             if (!activeTabId) return;
-            const started = await window.archiveBrowser.siteCapture.start(activeTabId, scope);
-            if (started.started && started.jobId) setCaptureJobId(started.jobId);
+            // Progress (including the job id) arrives via the capture
+            // progress event, so nothing needs to be tracked here.
+            await window.archiveBrowser.siteCapture.start(activeTabId, scope);
           }}
         />
       )}
@@ -199,9 +255,13 @@ export default function App() {
       {captureProgress && (
         <CaptureProgressDialog
           progress={captureProgress}
-          onPause={() => captureJobId && window.archiveBrowser.siteCapture.pause(captureJobId)}
-          onResume={() => captureJobId && window.archiveBrowser.siteCapture.resume(captureJobId)}
-          onCancel={() => captureJobId && window.archiveBrowser.siteCapture.cancel(captureJobId)}
+          // The job id comes from the progress payload itself rather than
+          // separate state, so pause/resume/cancel always target the job
+          // actually being reported -- even for a capture this renderer
+          // didn't start.
+          onPause={() => window.archiveBrowser.siteCapture.pause(captureProgress.jobId)}
+          onResume={() => window.archiveBrowser.siteCapture.resume(captureProgress.jobId)}
+          onCancel={() => window.archiveBrowser.siteCapture.cancel(captureProgress.jobId)}
           onClose={() => setCaptureProgress(null)}
           onOpenArchive={(p) => void openArchivePath(p)}
           onRevealArchive={(p) => void window.archiveBrowser.siteArchive.revealInFolder(p)}

@@ -7,7 +7,8 @@ import type { SettingsStore } from '../settings/settingsStore';
 import type { ArchiveRepo } from '../db/archiveRepo';
 import { archiveDirFor, archiveFilePaths } from '../util/paths';
 import { getOfflineSession } from '../offline/offlineSession';
-import { logger } from '../util/logger';
+import { logger, setDiagnosticLogging } from '../util/logger';
+import { resolvePermissionRequest } from '../security/permissionPrompts';
 import { canonicalizeUrl } from '../browser/urlUtils';
 import { zipArchiveDirectory } from '../util/zipExport';
 import { moveArchiveStorage } from '../util/moveStorage';
@@ -145,7 +146,12 @@ export function registerIpcHandlers(deps: Deps): void {
 
   // --- Settings ---
   handle(Channels.settingsGet, () => settings.get());
-  handle(Channels.settingsUpdate, (args) => settings.update(args));
+  handle(Channels.settingsUpdate, (args) => {
+    const next = settings.update(args);
+    // Take effect immediately, not just on next launch.
+    setDiagnosticLogging(next.diagnosticLogging);
+    return next;
+  });
   handle(Channels.settingsPickStorageDir, async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || result.filePaths.length === 0) return null;
@@ -201,6 +207,26 @@ export function registerIpcHandlers(deps: Deps): void {
       archiveCount: archiveRepo.countActive(),
       quotaBytes: maxMb ? maxMb * 1024 * 1024 : null,
     };
+  });
+
+  /**
+   * The user's answer to a permission prompt. An unknown or already-used
+   * requestId resolves nothing, so a stale or forged reply cannot grant a
+   * permission that was never requested.
+   */
+  handle(Channels.permissionRespond, (args) => {
+    if (args.remember) {
+      // "Always allow/deny for this kind" becomes a standing default, so
+      // the user isn't asked again for the same permission.
+      settings.update({
+        permissionDefaults: {
+          ...settings.get().permissionDefaults,
+          [args.permissionKind]: args.allow ? 'allow' : 'deny',
+        },
+      });
+    }
+    const resolved = resolvePermissionRequest(args.requestId, args.allow);
+    return { resolved };
   });
 
   handle(Channels.downloadsChooseSavePath, async (args) => {

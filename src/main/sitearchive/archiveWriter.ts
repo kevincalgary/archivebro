@@ -73,6 +73,7 @@ export function assetKindForContentType(contentType: string): AssetKind {
  */
 export class SiteArchiveBuilder {
   private pages: ArchivedPageEntry[] = [];
+  private pageNormalizedUrls = new Set<string>();
   private assets = new Map<string, ArchivedAssetEntry>();
   private responses = new Map<string, ArchivedResponseEntry>();
   private routes = new Map<string, RouteMapEntry>();
@@ -112,7 +113,10 @@ export class SiteArchiveBuilder {
   }
 
   hasPageForNormalizedUrl(normalizedUrl: string): boolean {
-    return this.pages.some((p) => p.normalizedUrl === normalizedUrl);
+    // Set lookup rather than scanning `pages`: this is called once per
+    // captured page, so a linear scan would be O(n^2) over the whole
+    // crawl -- which matters now that captures can be unlimited.
+    return this.pageNormalizedUrls.has(normalizedUrl);
   }
 
   /**
@@ -231,6 +235,7 @@ export class SiteArchiveBuilder {
       byteSize: htmlBuf.length,
     };
     this.pages.push(entry);
+    this.pageNormalizedUrls.add(input.normalizedUrl);
 
     // Route the page's own URL, plus every URL that redirected to it, so
     // links to any point in the redirect chain resolve offline.

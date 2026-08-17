@@ -16,6 +16,7 @@ function defaultSettings(): AppSettings {
     excludedDomains: [],
     searchEngineUrlTemplate: 'https://duckduckgo.com/?q=%s',
     screenshotQuality: 80,
+    diagnosticLogging: false,
     permissionDefaults: {
       notifications: 'deny',
       geolocation: 'ask',

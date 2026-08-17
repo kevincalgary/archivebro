@@ -13,9 +13,11 @@ const tabId = z.string().uuid();
 
 const captureScopeSchema = z.object({
   kind: z.enum(['current-page', 'entire-site', 'custom']),
-  maxDepth: z.number().int().min(0).max(10),
-  maxPages: z.number().int().min(1).max(2000),
-  maxTotalBytes: z.number().int().min(1024 * 1024).max(4 * 1024 * 1024 * 1024),
+  // null means "no limit"; finite values are additionally clamped to
+  // SCOPE_HARD_LIMITS in CaptureManager.clampScope.
+  maxDepth: z.number().int().min(0).max(25).nullable(),
+  maxPages: z.number().int().min(1).max(50_000).nullable(),
+  maxTotalBytes: z.number().int().min(1024 * 1024).max(64 * 1024 * 1024 * 1024).nullable(),
   allowedDomains: z.array(z.string().max(255)).max(100),
   includeExternalDomains: z.array(z.string().max(255)).max(100),
   includeDocuments: z.boolean(),
@@ -77,6 +79,7 @@ export const IpcSchemas = {
     excludedDomains: z.array(z.string().max(255)).max(2000).optional(),
     searchEngineUrlTemplate: z.string().max(2048).optional(),
     screenshotQuality: z.number().int().min(1).max(100).optional(),
+    diagnosticLogging: z.boolean().optional(),
     permissionDefaults: z
       .record(z.string(), z.enum(['ask', 'deny', 'allow']))
       .optional(),
@@ -92,6 +95,15 @@ export const IpcSchemas = {
     requestId: nonEmptyString,
     allow: z.boolean(),
     remember: z.boolean().optional(),
+    permissionKind: z.enum([
+      'notifications',
+      'geolocation',
+      'camera',
+      'microphone',
+      'midi',
+      'clipboard-read',
+      'display-capture',
+    ]),
   }),
 
   [Channels.downloadsChooseSavePath]: z.object({ suggestedName: z.string().max(255) }),

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppSettings, DiskUsageInfo, PermissionKind } from '../../../shared/types';
+import { LoadingPanel } from '../Progress';
 
 const PERMISSION_KINDS: PermissionKind[] = [
   'notifications',
@@ -24,7 +25,13 @@ export default function SettingsScreen() {
 
   useEffect(refresh, []);
 
-  if (!settings) return <div className="settings-screen">Loading…</div>;
+  if (!settings) {
+    return (
+      <div className="settings-screen">
+        <LoadingPanel message="Loading settings…" />
+      </div>
+    );
+  }
 
   async function update(patch: Partial<AppSettings>) {
     const next = await window.archiveBrowser.settings.update(patch);
@@ -184,6 +191,24 @@ export default function SettingsScreen() {
             </select>
           </label>
         ))}
+      </section>
+
+      <section>
+        <h2>Diagnostics</h2>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.diagnosticLogging}
+            onChange={(e) => update({ diagnosticLogging: e.target.checked })}
+          />
+          Record full URLs in the log file
+        </label>
+        <p className="settings-note">
+          Off by default: logs normally record only a site's origin (for example{' '}
+          <code>https://example.com</code>), never the full address of a page you visited, and never page content or
+          credentials. Turn this on only while reproducing a bug — the log file on disk will then contain the addresses
+          of pages you visit.
+        </p>
       </section>
 
       <section>

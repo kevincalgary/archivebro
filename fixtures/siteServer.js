@@ -240,6 +240,20 @@ const routes = {
     ),
   }),
 
+  // A same-origin frame (archivable) next to a cross-origin one (not),
+  // so the placeholder behaviour can be tested.
+  '/frames': () => ({
+    body: layout(
+      'Frames',
+      `<h1>Frames</h1>
+       <iframe id="same" src="/frame-content" width="300" height="120"></iframe>
+       <iframe id="cross" src="http://127.0.0.1:1/embedded" width="300" height="120"></iframe>`,
+    ),
+  }),
+  '/frame-content': () => ({
+    body: layout('Frame Content', '<p id="inner">Same-origin frame content</p>'),
+  }),
+
   '/broken-assets': () => ({
     body: layout(
       'Broken Assets',

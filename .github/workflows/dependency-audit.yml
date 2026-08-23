@@ -1,0 +1,50 @@
+name: Dependency audit
+
+# Runs on every push/PR (catches a newly-added vulnerable dependency) and on
+# a weekly schedule (catches a CVE disclosed *after* a dependency was last
+# touched -- npm audit only re-evaluates what's already pinned in
+# package-lock.json against the advisory database as of whenever it runs,
+# so a schedule is what turns that into an actual cadence rather than a
+# one-time check).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # every Monday, 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # --ignore-scripts: this job only reads package-lock.json against
+      # advisory databases, so it doesn't need electron installed or
+      # better-sqlite3 rebuilt (the postinstall step both normal installs
+      # and this job would otherwise pay for).
+      - run: npm ci --ignore-scripts
+
+      # Hard gate. Only these dependencies ever reach a packaged build --
+      # see "files" in electron-builder.yml, which never includes
+      # devDependencies -- so a high/critical advisory here is the one
+      # that actually reaches a user and should fail the build.
+      - name: Audit production dependencies (fails on high/critical)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Informational, not a gate. As of the build that added this
+      # workflow, every open advisory is a devDependency-only, install/
+      # build-time issue (the @electron/rebuild -> tar/make-fetch-happen
+      # chain -- see README "Known limitations"); fixing it means a
+      # breaking major-version bump that hasn't been re-verified against
+      # this codebase yet. Reported here so it stays visible in every run
+      # instead of requiring someone to remember to check manually, without
+      # turning every PR red over an issue nobody is shipping.
+      - name: Audit all dependencies (informational, devDependencies included)
+        if: always()
+        run: npm audit || true

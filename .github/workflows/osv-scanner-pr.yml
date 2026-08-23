@@ -1,0 +1,23 @@
+name: OSV-Scanner PR scan
+
+# A second, independent advisory database (OSV.dev, not GitHub's) as a
+# cross-check on npm audit -- diff-based, so it only fails on a
+# vulnerability newly introduced by this PR, never on one of the
+# already-known, already-accepted devDependency advisories tracked in
+# dependency-audit.yml and README "Known limitations". That's what makes
+# this safe to run as a real gate rather than informationally: it can't go
+# red over something nobody just did.
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    branches: [main]
+
+permissions:
+  actions: read
+  security-events: write
+  contents: read
+
+jobs:
+  scan-pr:
+    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.5.1"

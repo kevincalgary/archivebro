@@ -9,6 +9,7 @@ import type {
 } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS, MIN_FREE_DISK_BYTES } from '../../shared/sitearchiveTypes';
 import { getDiskSpace } from '../capture/diskSpace';
+import { sampleCaptureMemory } from '../capture/memoryTelemetry';
 import { SiteArchiveBuilder } from './archiveWriter';
 import { CaptureJournal, type ReplayedCheckpoint } from './captureJournal';
 import { CrawlFrontier } from './crawlFrontier';
@@ -439,7 +440,17 @@ export class CaptureJob {
    * builder live outside the view, so nothing captured so far is lost.
    */
   private async recycleView(): Promise<void> {
-    logger.info('sitearchive.recycling_view', { pagesCompleted: this.pagesCompleted });
+    // Sampled on the *old* view right before it's torn down, so this line
+    // says how much the renderer had grown to by the time recycling
+    // triggered -- the docstring above asserts recycling reclaims that
+    // memory, but nothing previously measured whether it actually does.
+    const memory =
+      this.view && !this.view.webContents.isDestroyed() ? sampleCaptureMemory(this.view.webContents) : null;
+    logger.info('sitearchive.recycling_view', {
+      pagesCompleted: this.pagesCompleted,
+      rendererBytesBeforeRecycle: memory?.rendererBytes ?? null,
+      rendererPeakBytesBeforeRecycle: memory?.rendererPeakBytes ?? null,
+    });
     this.destroyView();
     // Let the old renderer process actually go away before starting another.
     await sleep(500);

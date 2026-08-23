@@ -16,6 +16,7 @@ import { captureElementScreenshots, unavailableImagePlaceholder, type FallbackCa
 import { fetchResource } from './resourceFetcher';
 import { isDocumentUrl, isMediaUrl, isInScope, normalizeUrl, hostOf } from './urlNormalize';
 import { captureFullPageScreenshot } from '../capture/screenshotCapture';
+import { sampleCaptureMemory } from '../capture/memoryTelemetry';
 import { logger } from '../util/logger';
 import { mapWithConcurrency, withDeadline, TIMED_OUT } from '../util/concurrency';
 
@@ -320,11 +321,20 @@ export async function capturePage(
   } finally {
     // Logged here rather than on the success path: a page that failed or
     // blew its budget is exactly the one whose phase breakdown matters.
+    // Sampled every page (the same cadence page_timings already logs at,
+    // so this adds fields to an existing line rather than new log volume)
+    // so a long crawl that dies leaves a memory trend behind it -- see
+    // memoryTelemetry.ts for why both processes are sampled.
+    const memory = sampleCaptureMemory(webContents);
     logger.info('sitearchive.page_timings', {
       domain: hostOf(input.finalUrl) ?? '(unparsable)',
       totalMs: Date.now() - startedAt,
       overBudget: Date.now() > deadline,
       ...timings,
+      mainRssBytes: memory.mainRssBytes,
+      mainHeapUsedBytes: memory.mainHeapUsedBytes,
+      rendererBytes: memory.rendererBytes,
+      rendererPeakBytes: memory.rendererPeakBytes,
     });
 
     // Remove the bookkeeping attributes we stamped onto the live page, so

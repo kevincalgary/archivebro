@@ -7,6 +7,7 @@ import type { SettingsStore } from '../settings/settingsStore';
 import type { ArchiveRepo } from '../db/archiveRepo';
 import { archiveDirFor, archiveFilePaths } from '../util/paths';
 import { getOfflineSession } from '../offline/offlineSession';
+import { expectedHashLookup, verifyMhtmlIntegrity } from '../offline/offlineProtocol';
 import { logger, setDiagnosticLogging } from '../util/logger';
 import { resolvePermissionRequest } from '../security/permissionPrompts';
 import { canonicalizeUrl } from '../browser/urlUtils';
@@ -128,12 +129,14 @@ export function registerIpcHandlers(deps: Deps): void {
     return { dir };
   });
 
-  handle(Channels.libraryOpenOffline, (args) => {
+  handle(Channels.libraryOpenOffline, async (args) => {
     const detail = archiveRepo.getById(args.archiveId);
     if (!detail) throw new Error('Archive not found');
-    const offlineSession = getOfflineSession(() => settings.get().archiveStorageDir);
+    const offlineSession = getOfflineSession(() => settings.get().archiveStorageDir, expectedHashLookup(archiveRepo));
     const mhtmlPath = archiveFilePaths(settings.get().archiveStorageDir, args.archiveId).mhtml;
-    const tabId = tabManager.openOfflineTab(args.archiveId, offlineSession, detail.hasMhtml, mhtmlPath);
+    const mhtmlVerified = await verifyMhtmlIntegrity(detail.hasMhtml, mhtmlPath, detail.mhtmlSha256, args.archiveId);
+    const integrityFailed = detail.hasMhtml && !mhtmlVerified;
+    const tabId = tabManager.openOfflineTab(args.archiveId, offlineSession, mhtmlVerified, mhtmlPath, integrityFailed);
     tabManager.activateTab(tabId);
     return tabId;
   });

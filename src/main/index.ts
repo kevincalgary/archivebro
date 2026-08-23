@@ -9,7 +9,7 @@ import { TabManager } from './browser/tabManager';
 import { createMainWindow } from './windows/mainWindow';
 import { buildAppMenu } from './windows/appMenu';
 import { registerIpcHandlers } from './ipc/handlers';
-import { registerArchiveSchemeAsPrivileged, registerArchiveProtocolHandler } from './offline/offlineProtocol';
+import { registerArchiveSchemeAsPrivileged, registerArchiveProtocolHandler, expectedHashLookup } from './offline/offlineProtocol';
 import { recoverFromInterruptedCaptures } from './capture/recovery';
 import { enforceStoragePolicies } from './settings/storageManager';
 import { Channels } from '../shared/ipcContract';
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   // Library thumbnails in the trusted UI load through archive:// too,
   // rather than granting the trusted window raw file:// access to the
   // archives directory.
-  registerArchiveProtocolHandler(session.defaultSession, () => settings.get().archiveStorageDir);
+  registerArchiveProtocolHandler(session.defaultSession, () => settings.get().archiveStorageDir, expectedHashLookup(archiveRepo));
 
   const mainWindow = createMainWindow();
   const captureService = new CaptureService(archiveRepo, settings);

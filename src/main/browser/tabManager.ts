@@ -277,7 +277,13 @@ export class TabManager {
    * specific, pre-validated path, on a session that still has no network
    * access and JavaScript disabled.
    */
-  openOfflineTab(archiveId: string, offlineSession: Electron.Session, hasMhtml: boolean, mhtmlFilePath: string): string {
+  openOfflineTab(
+    archiveId: string,
+    offlineSession: Electron.Session,
+    hasMhtml: boolean,
+    mhtmlFilePath: string,
+    integrityFailed = false,
+  ): string {
     const view = new WebContentsView({
       webPreferences: {
         session: offlineSession,
@@ -325,9 +331,8 @@ export class TabManager {
     this.mainWindow.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
 
-    const initialLoad = hasMhtml
-      ? view.webContents.loadFile(mhtmlFilePath)
-      : view.webContents.loadURL(`archive://${archiveId}/__fallback__`);
+    const fallbackUrl = `archive://${archiveId}/__fallback__${integrityFailed ? '?reason=integrity' : ''}`;
+    const initialLoad = hasMhtml ? view.webContents.loadFile(mhtmlFilePath) : view.webContents.loadURL(fallbackUrl);
     initialLoad.catch((err) => {
       logger.error('offline_tab.load_failed', { archiveId, error: err instanceof Error ? err.message : String(err) });
     });

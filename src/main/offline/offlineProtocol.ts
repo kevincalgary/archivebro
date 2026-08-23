@@ -4,6 +4,62 @@ import { existsSync, promises as fs } from 'node:fs';
 import { archiveDirFor, isValidArchiveId } from '../util/paths';
 import { logger } from '../util/logger';
 import { OFFLINE_CSP } from '../security/csp';
+import { sha256Hex } from '../util/hash';
+import type { ArchiveRepo } from '../db/archiveRepo';
+
+/**
+ * Looks up the capture-time SHA-256 recorded for one hashed file of an
+ * archive, or null if there's nothing to verify against (either the
+ * archive doesn't exist, or it predates the integrity-hash column and
+ * genuinely never recorded one).
+ */
+export type ExpectedHashLookup = (archiveId: string, file: 'screenshot' | 'text') => string | null;
+
+/** Files served through this protocol whose bytes are checksum-verified before being returned. */
+const HASHED_FILES: Record<string, 'screenshot' | 'text'> = {
+  'screenshot.png': 'screenshot',
+  'text.txt': 'text',
+};
+
+/** The `ExpectedHashLookup` backed by the real catalog. */
+export function expectedHashLookup(archiveRepo: ArchiveRepo): ExpectedHashLookup {
+  return (archiveId, file) => {
+    const detail = archiveRepo.getById(archiveId);
+    if (!detail) return null;
+    return file === 'screenshot' ? detail.screenshotSha256 : detail.textSha256;
+  };
+}
+
+/**
+ * The MHTML snapshot is loaded via `loadFile()`, not through this protocol
+ * (see tabManager.ts openOfflineTab), so it can't be verified inline the
+ * way screenshot/text are above -- this is checked once, up front, right
+ * before that load. Returns false ("treat as if there's no MHTML") on a
+ * hash mismatch, which routes the viewer down the same well-tested
+ * fallback path a failed capture already uses, rather than ever handing
+ * tampered bytes to `loadFile()`. `expectedSha256` null (predates the hash
+ * column) skips verification, same convention as everywhere else here.
+ */
+export async function verifyMhtmlIntegrity(
+  hasMhtml: boolean,
+  mhtmlPath: string,
+  expectedSha256: string | null,
+  archiveId: string,
+): Promise<boolean> {
+  if (!hasMhtml || !expectedSha256) return hasMhtml;
+  try {
+    const data = await fs.readFile(mhtmlPath);
+    if (sha256Hex(data) === expectedSha256) return true;
+    logger.error('offline_tab.mhtml_checksum_mismatch', { archiveId });
+    return false;
+  } catch (err) {
+    logger.error('offline_tab.mhtml_read_failed', {
+      archiveId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
 
 export const ARCHIVE_SCHEME = 'archive';
 
@@ -43,7 +99,11 @@ const CONTENT_TYPES: Record<string, string> = {
  * default session for Library thumbnails) rather than exposing raw
  * `file://` access to either.
  */
-export function registerArchiveProtocolHandler(sess: Session, getArchivesRoot: () => string): void {
+export function registerArchiveProtocolHandler(
+  sess: Session,
+  getArchivesRoot: () => string,
+  getExpectedHash: ExpectedHashLookup,
+): void {
   sess.protocol.handle(ARCHIVE_SCHEME, async (request) => {
     try {
       const url = new URL(request.url);
@@ -55,7 +115,7 @@ export function registerArchiveProtocolHandler(sess: Session, getArchivesRoot: (
       const requestedFile = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
 
       if (requestedFile === '__fallback__') {
-        return await buildFallbackResponse(dir);
+        return await buildFallbackResponse(dir, url.searchParams.get('reason'));
       }
 
       if (!requestedFile || requestedFile.includes('..') || path.isAbsolute(requestedFile)) {
@@ -76,6 +136,20 @@ export function registerArchiveProtocolHandler(sess: Session, getArchivesRoot: (
       // itself is never requested through this handler -- see
       // tabManager.ts openOfflineTab for why it's loaded via file:// instead.)
       const data = await fs.readFile(filePath);
+
+      const hashedKind = HASHED_FILES[requestedFile];
+      if (hashedKind) {
+        const expected = getExpectedHash(archiveId, hashedKind);
+        // null means either the archive predates the hash column or wasn't
+        // found -- nothing recorded, nothing to verify, same convention
+        // the .sitearchive reader uses for an unhashed manifest entry.
+        if (expected && sha256Hex(data) !== expected) {
+          logger.error('archive_protocol.checksum_mismatch', { archiveId, file: requestedFile });
+          return new Response('Checksum mismatch -- this file may have been modified since it was captured', {
+            status: 500,
+          });
+        }
+      }
 
       return new Response(data, {
         status: 200,
@@ -99,7 +173,7 @@ export function registerArchiveProtocolHandler(sess: Session, getArchivesRoot: (
  * covered by the same CSP and stays consistent with "no raw file://
  * access" even for the fallback path.
  */
-async function buildFallbackResponse(dir: string): Promise<Response> {
+async function buildFallbackResponse(dir: string, reason: string | null): Promise<Response> {
   const screenshotPath = path.join(dir, 'screenshot.png');
   const textPath = path.join(dir, 'text.txt');
   const hasScreenshot = existsSync(screenshotPath);
@@ -109,6 +183,10 @@ async function buildFallbackResponse(dir: string): Promise<Response> {
   } catch {
     text = '';
   }
+  const bannerText =
+    reason === 'integrity'
+      ? 'This archived page failed an integrity check and could not be shown -- its saved MHTML snapshot does not match the hash recorded at capture time, which usually means the file was modified or corrupted after it was captured. Showing the saved screenshot and extracted text instead.'
+      : 'This archived page could not be rendered faithfully. Showing the saved screenshot and extracted text instead.';
 
   const html = `<!doctype html>
 <html>
@@ -123,7 +201,7 @@ async function buildFallbackResponse(dir: string): Promise<Response> {
 </style>
 </head>
 <body>
-  <div class="banner">This archived page could not be rendered faithfully. Showing the saved screenshot and extracted text instead.</div>
+  <div class="banner">${escapeHtml(bannerText)}</div>
   ${hasScreenshot ? '<h2>Screenshot</h2><img src="screenshot.png" alt="Archived page screenshot">' : ''}
   <h2>Extracted text</h2>
   <pre>${escapeHtml(text) || '(no text was extracted for this archive)'}</pre>

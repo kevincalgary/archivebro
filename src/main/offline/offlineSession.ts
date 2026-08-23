@@ -1,7 +1,7 @@
 import { session, type Session } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { registerArchiveProtocolHandler } from './offlineProtocol';
+import { registerArchiveProtocolHandler, type ExpectedHashLookup } from './offlineProtocol';
 import { logger } from '../util/logger';
 
 const OFFLINE_PARTITION = 'offline-viewer';
@@ -14,11 +14,11 @@ let offlineSession: Session | null = null;
  * even a future mode that re-enables scripting for a specific archive
  * still cannot make this session emit real network traffic.
  */
-export function getOfflineSession(getArchivesRoot: () => string): Session {
+export function getOfflineSession(getArchivesRoot: () => string, getExpectedHash: ExpectedHashLookup): Session {
   if (offlineSession) return offlineSession;
 
   offlineSession = session.fromPartition(OFFLINE_PARTITION, { cache: false });
-  registerArchiveProtocolHandler(offlineSession, getArchivesRoot);
+  registerArchiveProtocolHandler(offlineSession, getArchivesRoot, getExpectedHash);
 
   offlineSession.webRequest.onBeforeRequest((details, callback) => {
     if (details.url.startsWith('archive://') || details.url.startsWith('devtools://')) {

@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { launchApp, navigateViaAddressBar, withFixtureServer, waitForArchiveCount, waitForTabs, testHooks, type AppHandle } from './helpers';
 
 test.describe('offline viewing', () => {
@@ -58,6 +60,35 @@ test.describe('offline viewing', () => {
       // directly, since Playwright can't attach to WebContentsView content;
       // see the offlineSession.ts webRequest denylist for the enforcement.
       await waitForTabs(handle.app, (tabs) => tabs.some((t) => t.isOffline));
+    });
+  });
+
+  test('a page.mhtml modified on disk since capture fails its integrity check and falls back instead of rendering tampered bytes', async () => {
+    await withFixtureServer(async (base) => {
+      await navigateViaAddressBar(handle, `${base}/`);
+      const items = await waitForArchiveCount(handle.app, (i) => i.some((i2) => i2.status === 'success'));
+      const captured = items.find((i) => i.finalUrl === `${base}/`)!;
+      const root = await testHooks(handle.app).archivesRoot();
+      const mhtmlPath = path.join(root, captured.id, 'page.mhtml');
+
+      // Flip a byte in the middle of the file -- simulates on-disk tampering
+      // or bit rot between capture and viewing, distinct from the file
+      // simply being deleted (covered by the "no MHTML" fallback path
+      // elsewhere).
+      const original = await fs.readFile(mhtmlPath);
+      const tampered = Buffer.from(original);
+      tampered[Math.floor(tampered.length / 2)] ^= 0xff;
+      await fs.writeFile(mhtmlPath, tampered);
+
+      await handle.window.getByRole('button', { name: /Library/ }).click();
+      await handle.window.locator('.archive-card').first().click();
+      await handle.window.getByRole('button', { name: 'Open offline' }).click();
+
+      const tabs = await waitForTabs(handle.app, (tabs) =>
+        tabs.some((t) => t.isOffline && t.url.startsWith('archive://') && t.url.includes('__fallback__')),
+      );
+      const offlineTab = tabs.find((t) => t.isOffline);
+      expect(offlineTab?.url).toContain('reason=integrity');
     });
   });
 });

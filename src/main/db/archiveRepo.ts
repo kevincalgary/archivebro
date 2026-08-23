@@ -22,6 +22,9 @@ interface ArchiveRow {
   has_mhtml: number;
   has_screenshot: number;
   has_text: number;
+  mhtml_sha256: string | null;
+  screenshot_sha256: string | null;
+  text_sha256: string | null;
   deleted: number;
 }
 
@@ -67,6 +70,9 @@ export interface NewArchiveInput {
   hasMhtml: boolean;
   hasScreenshot: boolean;
   hasText: boolean;
+  mhtmlSha256: string | null;
+  screenshotSha256: string | null;
+  textSha256: string | null;
 }
 
 export class ArchiveRepo {
@@ -79,10 +85,12 @@ export class ArchiveRepo {
           `INSERT INTO archives (
             id, canonical_url, original_url, final_url, title, domain, favicon_path,
             referrer_url, captured_at, visited_at, status, warnings_json, size_bytes,
-            app_version, schema_version, tags_json, notes, has_mhtml, has_screenshot, has_text, deleted
+            app_version, schema_version, tags_json, notes, has_mhtml, has_screenshot, has_text,
+            mhtml_sha256, screenshot_sha256, text_sha256, deleted
           ) VALUES (@id, @canonicalUrl, @originalUrl, @finalUrl, @title, @domain, @faviconPath,
             @referrerUrl, @capturedAt, @visitedAt, @status, @warningsJson, @sizeBytes,
-            @appVersion, @schemaVersion, @tagsJson, NULL, @hasMhtml, @hasScreenshot, @hasText, 0)`,
+            @appVersion, @schemaVersion, @tagsJson, NULL, @hasMhtml, @hasScreenshot, @hasText,
+            @mhtmlSha256, @screenshotSha256, @textSha256, 0)`,
         )
         .run({
           ...input,
@@ -132,6 +140,9 @@ export class ArchiveRepo {
       hasMhtml: row.has_mhtml === 1,
       hasScreenshot: row.has_screenshot === 1,
       hasText: row.has_text === 1,
+      mhtmlSha256: row.mhtml_sha256,
+      screenshotSha256: row.screenshot_sha256,
+      textSha256: row.text_sha256,
       versionCount,
     };
   }

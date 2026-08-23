@@ -1,6 +1,6 @@
 import { app } from 'electron';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export function getAppVersion(): string {
   return app.getVersion();

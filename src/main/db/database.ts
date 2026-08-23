@@ -3,7 +3,7 @@ import { logger } from '../util/logger';
 import { runMigrations } from './migrations';
 import { SCHEMA_SQL } from './schema';
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 let db: Database.Database | null = null;
 
@@ -18,7 +18,15 @@ export function openDatabase(dbPath: string): Database.Database {
   const versionRow = instance
     .prepare('SELECT value FROM schema_meta WHERE key = ?')
     .get('schema_version') as { value: string } | undefined;
-  const currentVersion = versionRow ? Number(versionRow.value) : 0;
+  // No row means this file was just created by the instance.exec(SCHEMA_SQL)
+  // call above -- schema.ts always describes the *current* shape, so a
+  // brand-new database is already at CURRENT_SCHEMA_VERSION and needs no
+  // migrations replayed (replaying them would re-apply changes, like an
+  // ALTER TABLE ADD COLUMN, against columns SCHEMA_SQL already created).
+  // Only a real existing install -- which always has this row, written
+  // unconditionally below on every previous open -- reports a version
+  // less than current.
+  const currentVersion = versionRow ? Number(versionRow.value) : CURRENT_SCHEMA_VERSION;
 
   const finalVersion = runMigrations(instance, currentVersion, CURRENT_SCHEMA_VERSION);
 

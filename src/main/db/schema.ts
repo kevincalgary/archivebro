@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS archives (
   has_mhtml INTEGER NOT NULL DEFAULT 0,
   has_screenshot INTEGER NOT NULL DEFAULT 0,
   has_text INTEGER NOT NULL DEFAULT 0,
+  mhtml_sha256 TEXT,                 -- content hash at capture time; null for archives predating this column
+  screenshot_sha256 TEXT,
+  text_sha256 TEXT,
   deleted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

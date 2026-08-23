@@ -23,6 +23,9 @@ function makeInput(overrides: Partial<NewArchiveInput> = {}): NewArchiveInput {
     hasMhtml: true,
     hasScreenshot: true,
     hasText: true,
+    mhtmlSha256: null,
+    screenshotSha256: null,
+    textSha256: null,
     ...overrides,
   };
 }
@@ -43,6 +46,26 @@ describe('ArchiveRepo', () => {
     const detail = repo.getById(input.id);
     expect(detail?.title).toBe('Example Page');
     expect(detail?.versionCount).toBe(1);
+  });
+
+  it('round-trips per-file capture-time SHA-256 hashes, and tolerates null for pre-existing rows', () => {
+    const withHashes = makeInput({
+      mhtmlSha256: 'a'.repeat(64),
+      screenshotSha256: 'b'.repeat(64),
+      textSha256: 'c'.repeat(64),
+    });
+    repo.insert(withHashes);
+    const detail = repo.getById(withHashes.id);
+    expect(detail?.mhtmlSha256).toBe('a'.repeat(64));
+    expect(detail?.screenshotSha256).toBe('b'.repeat(64));
+    expect(detail?.textSha256).toBe('c'.repeat(64));
+
+    const withoutHashes = makeInput({ canonicalUrl: 'https://example.com/older', finalUrl: 'https://example.com/older' });
+    repo.insert(withoutHashes);
+    const olderDetail = repo.getById(withoutHashes.id);
+    expect(olderDetail?.mhtmlSha256).toBeNull();
+    expect(olderDetail?.screenshotSha256).toBeNull();
+    expect(olderDetail?.textSha256).toBeNull();
   });
 
   it('re-visiting the same canonical URL creates a new version, not an overwrite', () => {

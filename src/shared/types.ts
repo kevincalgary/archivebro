@@ -63,6 +63,10 @@ export interface ArchiveDetail extends ArchiveRecord {
   hasMhtml: boolean;
   hasScreenshot: boolean;
   hasText: boolean;
+  /** SHA-256 recorded at capture time, or null for archives predating this column. Verified on open/read. */
+  mhtmlSha256: string | null;
+  screenshotSha256: string | null;
+  textSha256: string | null;
   versionCount: number;
 }
 

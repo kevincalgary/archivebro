@@ -11,6 +11,7 @@ import { canonicalizeUrl, extractDomain } from '../browser/urlUtils';
 import { captureFullPageScreenshot } from './screenshotCapture';
 import { extractVisibleText } from './textExtraction';
 import { hasSufficientDiskSpace } from './diskSpace';
+import { sha256Hex } from '../util/hash';
 import type { CaptureStatus, CaptureWarning } from '../../shared/types';
 import { APP_VERSION, SCHEMA_VERSION } from '../appMeta';
 
@@ -179,6 +180,9 @@ export class CaptureService {
         hasMhtml: false,
         hasScreenshot: false,
         hasText: false,
+        mhtmlSha256: null,
+        screenshotSha256: null,
+        textSha256: null,
       });
       this.repo.markCaptureFinished(archiveId);
       this.emit(nav.tabId, 'failed', archiveId);
@@ -189,6 +193,9 @@ export class CaptureService {
     let hasMhtml = false;
     let hasScreenshot = false;
     let hasText = false;
+    let mhtmlSha256: string | null = null;
+    let screenshotSha256: string | null = null;
+    let textSha256: string | null = null;
     let extractedText = '';
     let faviconPath: string | null = null;
     const title = safeTitle(webContents);
@@ -207,6 +214,11 @@ export class CaptureService {
         try {
           await webContents.savePage(stagedMhtml, 'MHTML');
           hasMhtml = true;
+          // savePage() writes directly to disk rather than returning bytes,
+          // so the hash is computed by reading the file straight back --
+          // this is the one avenue that ensures we hash exactly what
+          // landed on disk, not what we intended to write.
+          mhtmlSha256 = sha256Hex(await fs.readFile(stagedMhtml));
         } catch (err) {
           warnings.push({ code: 'mhtml-failed', message: describeError(err) });
           logger.warn('capture.mhtml_failed', { archiveId, domain, error: describeError(err) });
@@ -216,6 +228,7 @@ export class CaptureService {
           const shot = await captureFullPageScreenshot(webContents, settings.screenshotQuality);
           await atomicWriteFile(stagedScreenshot, shot.png);
           hasScreenshot = true;
+          screenshotSha256 = sha256Hex(shot.png);
           if (shot.kind === 'viewport') {
             // The archive still gets a screenshot, but not the full-page
             // one it is supposed to hold. Say so instead of reporting a
@@ -235,6 +248,7 @@ export class CaptureService {
           extractedText = await extractVisibleText(webContents);
           await atomicWriteFile(stagedText, extractedText);
           hasText = true;
+          textSha256 = sha256Hex(extractedText);
         } catch (err) {
           warnings.push({ code: 'text-extraction-failed', message: describeError(err) });
           logger.warn('capture.text_failed', { archiveId, domain, error: describeError(err) });
@@ -269,7 +283,14 @@ export class CaptureService {
           capturedAt: new Date().toISOString(),
           visitedAt: nav.visitedAt,
         };
-        await atomicWriteFile(stagedMeta, JSON.stringify({ ...record, warnings, hasMhtml, hasScreenshot, hasText }, null, 2));
+        await atomicWriteFile(
+          stagedMeta,
+          JSON.stringify(
+            { ...record, warnings, hasMhtml, hasScreenshot, hasText, mhtmlSha256, screenshotSha256, textSha256 },
+            null,
+            2,
+          ),
+        );
         this.stateFor(nav.tabId).lastTitle = title;
       });
 
@@ -293,6 +314,9 @@ export class CaptureService {
         hasMhtml,
         hasScreenshot,
         hasText,
+        mhtmlSha256,
+        screenshotSha256,
+        textSha256,
       });
       if (extractedText) this.repo.updateExtractedText(archiveId, extractedText);
       this.repo.markCaptureFinished(archiveId);
@@ -319,6 +343,9 @@ export class CaptureService {
         hasMhtml: false,
         hasScreenshot: false,
         hasText: false,
+        mhtmlSha256: null,
+        screenshotSha256: null,
+        textSha256: null,
       });
       this.repo.markCaptureFinished(archiveId);
       this.emit(nav.tabId, 'failed', archiveId);

@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { launchApp, navigateViaAddressBar, withFixtureServer, waitForArchiveCount, testHooks, type AppHandle } from './helpers';
+
+/** Read a PNG's dimensions straight out of its IHDR header. */
+function pngSize(png: Buffer): { width: number; height: number } {
+  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+}
 
 test.describe('navigation and automatic capture', () => {
   let handle: AppHandle;
@@ -72,6 +79,43 @@ test.describe('navigation and automatic capture', () => {
         items.some((i) => i.finalUrl === `${base}/lazy-images`),
       );
       expect(items.find((i) => i.finalUrl === `${base}/lazy-images`)?.status).toBe('success');
+    });
+  });
+
+  test('a very large page is captured full-page and within the raster budget', async () => {
+    // End-to-end cover for the capture budget: a page far bigger than the
+    // window must still produce a real full-page screenshot, and the
+    // rasterized bitmap must stay inside the documented limits.
+    //
+    // The arithmetic itself is pinned by tests/unit/screenshotBudget.spec.ts,
+    // which is what actually discriminates the corrected device-pixel
+    // budget from the old CSS-pixel one. Chromium applies clamping of its
+    // own on top, so this test confirms the end result is sane rather than
+    // isolating the formula.
+    await withFixtureServer(async (base) => {
+      await navigateViaAddressBar(handle, `${base}/tall-page`);
+      const items = await waitForArchiveCount(handle.app, (i) =>
+        i.some((a) => a.finalUrl === `${base}/tall-page` && a.status === 'success'),
+      );
+      const archive = items.find((i) => i.finalUrl === `${base}/tall-page`);
+      expect(archive).toBeTruthy();
+
+      const root = await testHooks(handle.app).archivesRoot();
+      const png = await fs.readFile(path.join(root, archive!.id, 'screenshot.png'));
+      const { width, height } = pngSize(png);
+
+      // The page is ~12,000 CSS px tall. A viewport crop would be roughly
+      // the window height; a genuine full-page shot is many times that.
+      expect(height).toBeGreaterThan(8_000);
+      // Neither dimension may reach Chromium's texture ceiling...
+      expect(height).toBeLessThanOrEqual(16_384);
+      expect(width).toBeLessThanOrEqual(16_384);
+      // ...and the whole bitmap has to stay inside the memory budget,
+      // which Chromium does not enforce on its own.
+      expect(width * height).toBeLessThanOrEqual(33_000_000);
+
+      // No silent downgrade should have been recorded either.
+      expect(archive!.warnings?.some((w) => w.code === 'screenshot-viewport-only')).toBeFalsy();
     });
   });
 

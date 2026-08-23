@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { session, BrowserWindow } from 'electron';
+import { app, session, BrowserWindow } from 'electron';
 import type { ArchiveRepo } from './db/archiveRepo';
 import type { SettingsStore } from './settings/settingsStore';
 import type { TabManager } from './browser/tabManager';
@@ -9,6 +9,7 @@ import type { CaptureManager } from './sitearchive/captureManager';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../shared/sitearchiveTypes';
 import { openSiteArchive } from './sitearchive/archiveReader';
 import { registerOpenedArchive, getSiteArchiveSession } from './sitearchive/sitearchiveSession';
+import { discardRecoveredCapture, finalizeRecoveredCapture, listRecoverableCaptures } from './sitearchive/archiveWriter';
 
 /**
  * A narrow, explicit back door for end-to-end tests. Playwright's Electron
@@ -51,6 +52,18 @@ export interface TestHooks {
   simulateCrashedCapture: () => Promise<string>;
   stagingDirExists: (archiveId: string) => Promise<boolean>;
   isInterruptedCaptureTracked: (archiveId: string) => boolean;
+  /** Interrupted .sitearchive captures whose staged work can still be salvaged. */
+  listRecoverableCaptures: () => Promise<
+    Array<{ stagingDir: string; archiveId: string; startUrl: string; outputPath: string; bytesOnDisk: number }>
+  >;
+  /** Write what an interrupted capture managed to capture, without crawling further. */
+  finalizeRecoveredCapture: (
+    stagingDir: string,
+  ) => Promise<{ archivePath: string; pageCount: number; assetCount: number; fileSizeBytes: number } | null>;
+  /** Continue an interrupted capture from its checkpoint. */
+  resumeInterruptedCapture: (stagingDir: string) => Promise<{ jobId: string } | null>;
+  /** Throw away an interrupted capture and everything it staged. */
+  discardRecoveredCapture: (stagingDir: string) => Promise<void>;
 }
 
 declare global {
@@ -136,5 +149,31 @@ export function installTestHooks(
       }
     },
     isInterruptedCaptureTracked: (archiveId: string) => hooks.archiveRepo.listInterruptedCaptureIds().includes(archiveId),
+    listRecoverableCaptures: async () => {
+      const found = await listRecoverableCaptures(app.getPath('temp'));
+      return found.map((r) => ({
+        stagingDir: r.stagingDir,
+        archiveId: r.meta.archiveId,
+        startUrl: r.meta.startUrl,
+        outputPath: r.meta.outputPath,
+        bytesOnDisk: r.bytesOnDisk,
+      }));
+    },
+    finalizeRecoveredCapture: async (stagingDir: string) =>
+      finalizeRecoveredCapture(stagingDir, app.getVersion()),
+    discardRecoveredCapture: (stagingDir: string) => discardRecoveredCapture(stagingDir),
+    resumeInterruptedCapture: async (stagingDir: string) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) throw new Error('No window');
+      const started = await hooks.captureManager.resumeInterrupted({
+        window: win,
+        session: session.fromPartition('persist:browsing'),
+        stagingDir,
+      });
+      if (!started) return null;
+      activeJobId = started.jobId;
+      capturePromise = started.promise.catch(() => null);
+      return { jobId: started.jobId };
+    },
   };
 }

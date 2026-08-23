@@ -14,9 +14,10 @@ import {
 } from './pageScript';
 import { captureElementScreenshots, unavailableImagePlaceholder, type FallbackCandidate } from './imageFallback';
 import { fetchResource } from './resourceFetcher';
-import { isDocumentUrl, isMediaUrl, isInScope, normalizeUrl } from './urlNormalize';
+import { isDocumentUrl, isMediaUrl, isInScope, normalizeUrl, hostOf } from './urlNormalize';
 import { captureFullPageScreenshot } from '../capture/screenshotCapture';
 import { logger } from '../util/logger';
+import { mapWithConcurrency, withDeadline, TIMED_OUT } from '../util/concurrency';
 
 export interface DiscoveredLink {
   url: string;
@@ -32,6 +33,12 @@ export interface PageCaptureResult {
   links: DiscoveredLink[];
   bytesDownloaded: number;
   warnings: string[];
+  /**
+   * True when the full-page screenshot fell back to a viewport crop. The
+   * crawler watches this: a run of these means the renderer is wedged, and
+   * every page captured meanwhile is quietly missing most of its image.
+   */
+  screenshotDegraded: boolean;
 }
 
 export interface PageCaptureContext {
@@ -43,29 +50,19 @@ export interface PageCaptureContext {
   resourceTimeoutMs: number;
   /** How many subresources of a single page to fetch at once. */
   assetConcurrency: number;
-}
-
-/**
- * Run `fn` over `items` with at most `limit` in flight, preserving result
- * order. Rejections are not possible here (fetchResource resolves null on
- * failure), so one bad resource can never abort the rest.
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    for (;;) {
-      const index = next++;
-      if (index >= items.length) return;
-      results[index] = await fn(items[index]!, index);
-    }
-  });
-  await Promise.all(workers);
-  return results;
+  /**
+   * Wall-clock ceiling for capturing one page.
+   *
+   * Nothing else bounds this. `loadUrl` has its own navigation timeout,
+   * and each resource fetch has one, but the capture phases have no
+   * collective limit -- so a single pathological page can stall a crawl
+   * indefinitely. Measured on a real forum photo thread (116 images, 27
+   * dead third-party hosts, heavy ad tags): over 15 minutes for one page,
+   * still unfinished. On a site with tens of thousands of pages that is
+   * fatal, and the durable fallbacks -- full-page screenshot and extracted
+   * text -- are cheap and still captured when the budget runs out.
+   */
+  pageBudgetMs: number;
 }
 
 interface CollectedResources {
@@ -91,15 +88,42 @@ export async function capturePage(
 ): Promise<PageCaptureResult> {
   const warnings: string[] = [];
   let bytesDownloaded = 0;
+  let screenshotDegraded = false;
   const pageId = crypto.randomUUID();
+
+  // Phase timings. A single page can take minutes on a link- and
+  // image-heavy forum thread, and without this there is no way to tell
+  // which phase is responsible -- guessing produced the wrong answer twice.
+  const startedAt = Date.now();
+  let mark = startedAt;
+  const timings: Record<string, number> = {};
+  const phase = (name: string) => {
+    const now = Date.now();
+    timings[name] = now - mark;
+    mark = now;
+  };
+  const deadline = startedAt + ctx.pageBudgetMs;
+  const outOfTime = () => Date.now() > deadline;
 
   // Remember where the user was before we touch the scroll position.
   const originalScroll = (await safeEval<{ x: number; y: number }>(webContents, GET_SCROLL_SCRIPT)) ?? { x: 0, y: 0 };
 
   try {
-    await safeEval(webContents, LAZY_LOAD_SWEEP_SCRIPT);
+    const lazyLoadResult = await withDeadline(safeEval(webContents, LAZY_LOAD_SWEEP_SCRIPT), deadline);
+    phase('lazyLoadSweepMs');
+    if (lazyLoadResult === TIMED_OUT) {
+      warnings.push('Page took too long to settle lazy-loaded content; some images may be missing.');
+    }
 
-    const collected = await safeEval<CollectedResources>(webContents, COLLECT_RESOURCES_SCRIPT);
+    const collectedResult = await withDeadline(
+      safeEval<CollectedResources>(webContents, COLLECT_RESOURCES_SCRIPT),
+      deadline,
+    );
+    phase('collectResourcesMs');
+    if (collectedResult === TIMED_OUT) {
+      throw new Error('Could not collect page resources (page time budget exceeded)');
+    }
+    const collected = collectedResult;
     if (!collected) {
       throw new Error('Could not collect page resources');
     }
@@ -126,13 +150,22 @@ export async function capturePage(
     // Browsers open several connections per host as a matter of course, so
     // a small bounded pool here is ordinary behaviour rather than
     // aggressive: page-level politeness is still governed by crawlDelayMs.
-    const fetched = await mapWithConcurrency(wanted, ctx.assetConcurrency, (resource) =>
-      fetchResource(resource.url, {
-        session: ctx.session,
-        maxBytes: ctx.maxResourceBytes,
-        timeoutMs: ctx.resourceTimeoutMs,
-      }),
+    const { results: fetched, abandoned, abandonedIndices } = await mapWithConcurrency(
+      wanted,
+      ctx.assetConcurrency,
+      (resource) =>
+        fetchResource(resource.url, {
+          session: ctx.session,
+          maxBytes: ctx.maxResourceBytes,
+          timeoutMs: ctx.resourceTimeoutMs,
+        }),
+      outOfTime,
     );
+    if (abandoned > 0) {
+      warnings.push(`Page took too long: ${abandoned} resource(s) were not downloaded.`);
+    }
+
+    phase('fetchResourcesMs');
 
     // Apply results in the original order so the archive is byte-stable
     // regardless of the order responses happened to come back in.
@@ -147,13 +180,26 @@ export async function capturePage(
 
       if (!response) {
         // Images that fail here become screenshot-fallback candidates,
-        // which the serialize step marks and we handle below.
-        ctx.builder.addFailure({
-          url: resource.url,
-          kind: 'fetch-failed',
-          message: 'Resource could not be downloaded',
-          discoveredOn: input.finalUrl,
-        });
+        // which the serialize step marks and we handle below. Abandoned
+        // (budget ran out before this resource started) is recorded
+        // separately from a genuine fetch failure -- conflating the two
+        // mislabels every budget casualty as a broken link, and unlike an
+        // ordinary failure these are uncapped and can crowd out real ones.
+        await ctx.builder.addFailure(
+          abandonedIndices.has(i)
+            ? {
+                url: resource.url,
+                kind: 'skipped-budget',
+                message: 'Page time budget was exceeded before this resource could be downloaded.',
+                discoveredOn: input.finalUrl,
+              }
+            : {
+                url: resource.url,
+                kind: 'fetch-failed',
+                message: 'Resource could not be downloaded',
+                discoveredOn: input.finalUrl,
+              },
+        );
         continue;
       }
 
@@ -162,15 +208,21 @@ export async function capturePage(
       urlMap[resource.url] = asset.path;
 
       const normalized = normalizeUrl(resource.url);
-      if (normalized) ctx.builder.routeAsset(normalized, asset.sha256);
+      if (normalized) await ctx.builder.routeAsset(normalized, asset.sha256);
     }
 
     // --- Serialize the rendered DOM with rewritten resource URLs ---
     const archiveOrigin = `${ARCHIVE_SITE_SCHEME}://${ctx.builder.archiveId}`;
-    const serialized = await safeEval<{ html: string; canvasFallbacks: Array<{ marker: string; index: number }> }>(
-      webContents,
-      serializeDomScript(JSON.stringify(urlMap), archiveOrigin),
+    const serializedResult = await withDeadline(
+      safeEval<{ html: string; canvasFallbacks: Array<{ marker: string; index: number }> }>(
+        webContents,
+        serializeDomScript(JSON.stringify(urlMap), archiveOrigin),
+      ),
+      deadline,
     );
+    phase('storeAndSerializeMs');
+    if (serializedResult === TIMED_OUT) throw new Error('Could not serialize page DOM (page time budget exceeded)');
+    const serialized = serializedResult;
     if (!serialized) throw new Error('Could not serialize page DOM');
 
     let html = serialized.html;
@@ -190,7 +242,12 @@ export async function capturePage(
         };
       });
 
-      const { results, skipped } = await captureElementScreenshots(webContents, input.finalUrl, candidates);
+      const { results, skipped } = await captureElementScreenshots(
+        webContents,
+        input.finalUrl,
+        candidates,
+        outOfTime,
+      );
 
       for (const result of results) {
         const asset = await ctx.builder.addAsset(result.png, 'image/png', null, result.meta);
@@ -209,17 +266,35 @@ export async function capturePage(
       }
     }
 
+    phase('imageFallbackMs');
+
     // --- Screenshot + text fallbacks, always available ---
     let screenshot: Buffer | null = null;
     try {
-      screenshot = await captureFullPageScreenshot(webContents, 90);
-      bytesDownloaded += screenshot.length;
+      const shot = await withDeadline(captureFullPageScreenshot(webContents, 90), deadline);
+      if (shot === TIMED_OUT) {
+        screenshotDegraded = true;
+        warnings.push('Full-page screenshot timed out for this page.');
+        logger.warn('sitearchive.page_screenshot_timeout', {});
+      } else {
+        screenshot = shot.png;
+        bytesDownloaded += shot.png.length;
+        if (shot.kind === 'viewport') {
+          screenshotDegraded = true;
+          warnings.push('Full-page screenshot failed; only the visible viewport was captured for this page.');
+          logger.warn('sitearchive.page_screenshot_viewport_only', { error: shot.reason });
+        }
+      }
     } catch (err) {
       warnings.push('Full-page screenshot failed for this page.');
       logger.warn('sitearchive.page_screenshot_failed', { error: describe(err) });
     }
 
-    const text = (await safeEval<string>(webContents, EXTRACT_TEXT_SCRIPT)) ?? '';
+    phase('pageScreenshotMs');
+
+    const textResult = await withDeadline(safeEval<string>(webContents, EXTRACT_TEXT_SCRIPT), deadline);
+    const text = textResult === TIMED_OUT ? '' : (textResult ?? '');
+    phase('extractTextMs');
 
     await ctx.builder.addPage({
       pageId,
@@ -234,8 +309,24 @@ export async function capturePage(
       redirectedFrom: input.redirectedFrom,
     });
 
-    return { pageId, title: collected.title || input.finalUrl, links: collected.links, bytesDownloaded, warnings };
+    return {
+      pageId,
+      title: collected.title || input.finalUrl,
+      links: collected.links,
+      bytesDownloaded,
+      warnings,
+      screenshotDegraded,
+    };
   } finally {
+    // Logged here rather than on the success path: a page that failed or
+    // blew its budget is exactly the one whose phase breakdown matters.
+    logger.info('sitearchive.page_timings', {
+      domain: hostOf(input.finalUrl) ?? '(unparsable)',
+      totalMs: Date.now() - startedAt,
+      overBudget: Date.now() > deadline,
+      ...timings,
+    });
+
     // Remove the bookkeeping attributes we stamped onto the live page, so
     // capturing leaves the user's page exactly as it was found...
     await safeEval(webContents, CLEANUP_LIVE_ATTRS_SCRIPT).catch(() => null);

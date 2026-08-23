@@ -66,6 +66,23 @@ Click **Capture the Page** in the toolbar (or File ▸ Capture the Page…, `Cmd
 
 Anything beyond the recommended limits requires an explicit confirmation before it will start. During capture you get a live progress bar, an elapsed clock, and pages-discovered / pages-saved / current-URL / downloaded-size / warning / failure counts, plus **Pause** and **Cancel**.
 
+### Which pages a budgeted crawl spends itself on
+
+A page limit forces a choice about *which* pages get captured, and the obvious answer is wrong. A plain FIFO queue makes the crawl strictly breadth-first, which sounds even-handed but lets a single link-dense page own the entire budget.
+
+This was reported against a real forum and it is severe. `rangerovers.net`'s front page yields **86 in-scope links** — 37 forum sections, 21 member profiles, 22 utility pages (`/login`, `/register`, `/search`, …) and only 5 threads. Threads otherwise live one level below, inside section pages. Breadth-first with the default 50-page budget therefore captured section and navigation pages until the budget ran out and archived **zero threads** — the entire reason someone captures a forum.
+
+Two changes fix that, neither of them site-specific:
+
+- **The frontier is rotated across the page that discovered each link** ([crawlFrontier.ts](src/main/sitearchive/crawlFrontier.ts)), taking one item per discovering page per turn instead of draining an entire level first. As soon as a section page is captured, the threads it found interleave with the sections still queued. Order within one page's links stays document order. On the forum fixture this takes a 25-page capture from 0 threads to 9.
+- **Account, search and navigation routes are skipped** (`looksNonContent()`), because they are not archivable content and every one captured is a thread not captured. Each skip is recorded as a `skipped-non-content` failure so it is visible in the archive rather than silent.
+
+**A single page cannot stall the crawl.** Navigation has a timeout and each resource fetch has one, but the capture phases had no collective limit — so one pathological page could hold a crawl open indefinitely. Measured on a real forum photo thread (116 images, 27 dead third-party image hosts, heavy ad tags): **over 15 minutes on one page without finishing.** Each page now gets a two-minute wall-clock budget; when it runs out, remaining resource fetches and per-element image fallbacks are abandoned, the shortfall is recorded as a warning, and the durable fallbacks (full-page screenshot and extracted text) are still captured. Per-phase timings are logged for every page, including pages that fail or blow the budget — which is exactly when they matter.
+
+**Skips are recorded once per URL, not once per link.** A "Log in" link in a site's global navigation is seen on every page crawled, and skips are decided before the enqueue dedupe — so without a guard of their own each records an identical failure entry per page, burying real failures. Skip kinds also get a per-kind ceiling (500) below the manifest's global 5,000, so they can never crowd genuine fetch failures out of the list.
+
+**Hitting a limit is now recorded in the archive**, as a `stopped-at-limit` failure naming how many discovered pages were left uncaptured. Previously a budget-truncated capture was indistinguishable from a complete one, which is exactly how a forum capture that reached no threads still looked like a success.
+
 The bar is measured against *pages discovered so far*, which is the only honest denominator mid-crawl — the true total isn't knowable up front, and finding new links legitimately makes the bar recede. While the archive is being zipped there's no countable unit, so that phase shows an indeterminate bar rather than a fabricated percentage. On completion you get the saved location, page and asset counts, final file size, a list of anything that failed, and **Open Archive** / **Reveal in Finder** (or **Show in File Explorer**) / **Retry failed pages**.
 
 ### The file format
@@ -85,6 +102,25 @@ index.sqlite           # queryable catalog of everything above
 ```
 
 Writes are atomic: everything is staged in a temp directory, zipped to `<name>.tmp-<uuid>`, and only renamed to the final `.sitearchive` after the capture and validation both succeed. A cancelled or crashed capture therefore can never damage an existing archive at that path.
+
+### Surviving an interrupted capture
+
+Writing the archive only at the end is what makes a half-written file impossible — but on its own it also means a crawl that dies at minute 150 produces *nothing*, which is exactly what happened to a 151-minute, 810-page, 2.6 GB capture of `landrover.ca`.
+
+Every captured byte was already on disk in the staging tree. What died with the process was the bookkeeping held in memory: which pages exist, which assets dedupe to which hash, the route map, and the crawl queue. So that bookkeeping is now journalled to disk as it is produced ([captureJournal.ts](src/main/sitearchive/captureJournal.ts)) — an append-only `checkpoint.jsonl` beside the staged files, plus a small metadata sidecar recording the start URL, scope and chosen output path.
+
+The ordering rule the design rests on: **bytes are written to the staging tree first, and the journal record is appended only after that succeeds.** A crash can leave a file the journal never mentions, which is harmless because the manifest is the authority and unlisted entries are ignored — but never a journal record naming a file that isn't there. Records are `await`ed rather than buffered, since buffered writes lost to a kill would be precisely the ones describing the most recent work. Replay tolerates a truncated final line, which is what a process killed mid-append leaves behind.
+
+An interrupted capture can then be:
+
+- **finished as it stands** (`finalizeRecoveredCapture()`) — a valid, checksum-consistent `.sitearchive` holding the pages that were captured, with a failure entry recording that it stopped early so it can never pass as complete; or
+- **resumed** (`CaptureManager.resumeInterrupted()`) — the crawl continues from the pending queue, re-capturing nothing. A resumed run keeps the original archive id, because that id is baked into the `archive-site://<archiveId>` URLs already serialized into every page captured before the interruption.
+
+A capture that *fails* (as opposed to being cancelled) now keeps its staging tree rather than deleting it, since that tree is recoverable work. Cancelling still discards everything, because the user asked for that.
+
+**Not yet surfaced in the UI.** This is a main-process capability with no user-facing entry point: nothing prompts you at startup, and there is no button to finish or resume an interrupted capture. Recoverable captures are logged at startup and the sweep spares them, but acting on one currently means calling the API. Wiring it to the UI is the next step — see roadmap.
+
+Staging directories are also swept on startup (`sweepSiteArchiveStaging()`). A cancelled or failed capture cleans up after itself, but a *killed* process never runs its cleanup, and the staging tree for a large crawl is gigabytes — six such directories totalling 3.8 GB were found left behind by real runs. The sweep skips any directory written to within the last hour, judged by the mtimes of its subdirectories rather than the parent, so it can never delete the staging tree of a capture that is still running in another instance. It also spares checkpointed trees for a full week, so the fix for leaked staging directories can never quietly delete a crawl that died overnight and is still recoverable.
 
 Double-clicking a `.sitearchive` opens it in Archive Browser on both macOS and Windows 11 (registered via `fileAssociations` in [electron-builder.yml](electron-builder.yml); delivered by the `open-file` event on macOS and via argv/`second-instance` on Windows).
 
@@ -119,7 +155,11 @@ Captured: rendered HTML and current DOM state, CSS, inline styles, images, favic
 
 **Cross-origin frames** can't be read or safely archived, so rather than leaving a mysterious blank box (or an `<iframe>` still pointing at the live web), they're replaced with a marked placeholder naming the host the content came from. No `<iframe>` in an archived page ever points at a network address; the original URL survives only as an inert provenance attribute.
 
-**Very tall pages** are screenshotted from the top down to 12,000 CSS pixels. Real marketing pages are frequently 20,000–40,000px tall and Chromium simply refuses to rasterize a bitmap that size — a truncated screenshot is far more useful than the silent failure that produced no screenshot at all, and the extracted text still covers the whole page. If the full-page capture fails anyway, a viewport screenshot is used so there is always *some* visual record.
+**Very tall pages** are screenshotted from the top down to 12,000 CSS pixels, and scaled down beyond that if the rasterized bitmap would still be too large. Real marketing pages are frequently 20,000–40,000px tall and Chromium simply refuses to rasterize a bitmap that size — a truncated screenshot is far more useful than the silent failure that produced no screenshot at all, and the extracted text still covers the whole page.
+
+The capture budget is expressed in **device** pixels, not CSS pixels, because that is what Chromium actually allocates: a page is rasterized at the display's device pixel ratio, so on an ordinary 2× display a CSS-pixel budget silently permits four times as much memory as it names. Two limits apply to the rasterized bitmap — 16,000px in either dimension (Chromium's own texture ceiling is 16,384, past which the capture fails outright) and 32 million pixels in total, roughly 128 MB as a raw bitmap. The page is scaled to fit both. `fitCaptureToBudget()` is pure and unit-tested across the full range of page shapes and display ratios.
+
+If the full-page capture fails anyway, a viewport screenshot is used so there is always *some* visual record — but the downgrade is **reported**, never silent: the Library records a `screenshot-viewport-only` warning on the archive, a site capture counts it as a warning on that page, and a run of consecutive downgrades during a crawl rebuilds the crawling view and is logged. An archive full of viewport crops that claims to hold full-page screenshots is a data-quality problem, not a cosmetic one.
 
 **Never** saved: password-field contents, authentication headers, cookies, session tokens, API keys, payment or autofill data, sensitive hidden fields (CSRF tokens), private keys, or DRM-protected media. Fields whose name/id/autocomplete look credential-shaped are cleared as well, and credential-shaped URLs and content types are skipped outright. The crawl renders pages using your existing logged-in session so authenticated pages look right — but only the rendered output is stored, so a shared archive never carries reusable credentials. This is verified by a test that greps the entire container for the fixture's password and CSRF values.
 
@@ -183,6 +223,8 @@ archive-browser/
       sitearchive/     portable .sitearchive feature:
                         archiveWriter.ts (container + atomic write), archiveReader.ts (safe read),
                         crawler.ts (scoped GET-only crawl), captureManager.ts (job lifecycle),
+                        captureJournal.ts (crash-recovery checkpoint + replay),
+                        crawlFrontier.ts (crawl queue ordering, Electron-free),
                         pageCapture.ts + pageScript.ts (rendered-DOM serialization),
                         imageFallback.ts (element screenshot fallback),
                         resourceFetcher.ts, urlNormalize.ts (routing/scope/trap heuristics),
@@ -207,6 +249,8 @@ archive-browser/
                                           images/fonts/SVG, lazy loading, JS-generated links,
                                           SPA routes, duplicate assets, missing resources,
                                           cross-origin links, forms, destructive links, loops,
+                                          a forum-shaped section (index -> sections -> threads,
+                                          plus member/utility routes) for crawl-ordering tests,
                                           and the awkward-image page for fallback tests)
   tests/
     unit/               vitest — pure logic, no Electron runtime needed
@@ -257,7 +301,7 @@ Tabs and the offline archive viewer are `WebContentsView` instances, not separat
 
 Tests run against local fixture websites ([fixtures/](fixtures/)) rather than the real internet, so nothing depends on a third-party site being up.
 
-As of this build: **123 unit tests** and **94 end-to-end tests**, all passing.
+As of this build: **164 unit tests** and **104 end-to-end tests**, all passing.
 
 **Unit** (`tests/unit`, pure logic): URL resolution/validation and normalization, tracking-parameter stripping, same-origin scope checks, destructive-link and crawler-trap heuristics, atomic writes, path/ID validation, the IPC zod schemas, the SQLite catalog including FTS search and versioning, disk-space checks, settings persistence, domain-exclusion matching, the `.sitearchive` container round-trip, and its rejection of malformed and malicious archives (traversal in every form, zip bombs, bad manifests, checksum mismatches, future format versions).
 
@@ -304,28 +348,37 @@ Some sites cannot be preserved perfectly: pages that depend on live APIs, server
 - **No packaged app icon** is included yet (`build/` is currently empty) — packaged builds use Electron's default icon.
 - **No dependency-audit CI step** is wired up yet (`npm audit` is run manually); see roadmap. As of this build, `npm audit` reports 10 advisories (2 critical) — all of them transitive dependencies of **devDependencies only** (`@electron/rebuild`'s `tar`/`make-fetch-happen` chain, and `vitest`'s bundled `esbuild`/`vite`), used at install/build time and never bundled into the packaged app. None are in a runtime dependency (`better-sqlite3`, `react`, `zod`, `archiver`, `zustand`). Still worth fixing before this goes further — `npm audit fix --force` resolves them but pulls in breaking major-version bumps (`vitest@4`, `@electron/rebuild@4`) that weren't re-verified against this codebase in this pass.
 - **Disk-full handling is checked before a capture starts** (a free-space floor via `fs.statfs`), not enforced mid-write via OS-level `ENOSPC` recovery — a capture that starts with enough headroom but hits a suddenly-full disk mid-write will fail that single capture (caught, logged, marked `failed`) rather than crash the app, but isn't retried.
-- **Developed and functionally verified on macOS only.** `npm run dev`, `npm run build`, the full `npm test` suite (82 tests), and both `npm run package:mac` and `package:mac:dist` were actually run in this environment, including launching the packaged `.app` straight off the built `.dmg`. `npm run package:win:dist` was also run here (cross-packaged from macOS — see "Packaging") and produced a valid NSIS installer and portable `.exe`, but neither was *executed*, since no Windows machine was available in this environment. The Windows-specific code paths (accelerator strings, `%LOCALAPPDATA%`-style paths via `app.getPath`) use the same cross-platform Electron APIs exercised on macOS and are expected to work, but that's an expectation, not a verified fact, until someone runs the installer on real Windows.
+- **Developed and functionally verified on macOS only.** `npm run dev`, `npm run build`, the full `npm test` suite (268 tests), and both `npm run package:mac` and `package:mac:dist` were actually run in this environment, including launching the packaged `.app` straight off the built `.dmg`. `npm run package:win:dist` was also run here (cross-packaged from macOS — see "Packaging") and produced a valid NSIS installer and portable `.exe`, but neither was *executed*, since no Windows machine was available in this environment. The Windows-specific code paths (accelerator strings, `%LOCALAPPDATA%`-style paths via `app.getPath`) use the same cross-platform Electron APIs exercised on macOS and are expected to work, but that's an expectation, not a verified fact, until someone runs the installer on real Windows.
 - **`.sitearchive` pages are crawled one at a time**, despite the concurrency setting being exposed and validated — it's plumbed through to the scope but doesn't yet render pages in parallel. Crawl delay and all the limits do take effect. *Within* a page, subresources are fetched with a bounded parallel pool (8 at a time), which is what makes real sites practical: on landrover.ca that's roughly 7s per page instead of ~50s.
 - **SPA routes that use the History API are captured as the single rendered state** they were in at capture time. Hash routes are captured the same way. The crawler discovers links from the rendered DOM, so JS-created `<a href>` links are followed, but routes reachable only by clicking a JS handler (no real href) are not.
 - **The "not captured" offline page signals its Open Live Version request via `document.title`**, because archived content deliberately has no IPC access. It works and is confirmed before anything opens, but it's a workaround rather than a clean channel.
 - **Retry failed pages re-runs the whole capture** from the same starting point rather than resuming just the failures. This keeps the resulting archive internally consistent instead of stitching two partial crawls together, but it does redo work.
+- **A very long unlimited capture can still die mid-run, and the cause is not yet identified.** A full unlimited capture of `landrover.ca` ran 151 minutes, saved 810 pages and 2,818 deduplicated assets (2.6 GB staged, 6.8 GB downloaded before dedup), then the Electron process died with no output file. No crash report was produced and the app logged nothing for the whole run, so the mechanism is still unknown. Two things were ruled out by measurement: **disk space** (1.5 TB free) and **the archive builder's in-memory metadata** — `pages`, `assets`, `routes`, `queuedOrDone` and `failures` together hold ~26 MB at that scale, so spilling them into `index.sqlite` would not have helped. The screenshot budget fix above removes one plausible contributor (bitmaps of up to 41.4 megapixels, ~166 MB raw, were being requested against a cap that named 20 million) but is **not** demonstrated to be the cause. Diagnosing this properly needs per-page memory telemetry over a long crawl, which has not been done yet.
+- **Full-page screenshots degraded badly on that same run** — 693 of 810 pages fell back to a viewport crop, and after page 346 every remaining page did, 464 in a row with no recovery. The downgrade is now reported and a run of them rebuilds the crawling view, but *why* the renderer stopped being able to produce full-page captures, and never recovered across view recycles, is still unexplained.
+- **Interrupted captures are recoverable but not yet recoverable *from the UI*.** The checkpoint journal means a killed or failed crawl can be finished as a partial archive or resumed (see "Surviving an interrupted capture"), and both paths are tested end-to-end against real crawls — but there is no button, prompt, or dialog for either. A user whose capture dies has no way to reach that recovery without the API.
+- **Non-content routes are skipped with no way to opt back in.** Sign-in, registration, search, member profiles and "new thread" routes are excluded from crawls (see "Which pages a budgeted crawl spends itself on"). The heuristic is deliberately narrow and every skip is recorded in the archive, but a site whose real content genuinely lives under, say, `/members/` cannot currently override it — Custom scope has no per-path allowlist.
+- **Very large forums cannot be captured whole.** Discovery stops at 50,000 URLs and one archive is capped at 64 GB. A mid-sized vBulletin/XenForo forum (rangerovers.net: 114,229 threads, 917,167 posts) needs roughly 52,000 pages and, at measured rates, far more space and time than either ceiling allows. Capturing individual sections or threads works; capturing a whole forum of that size does not.
+- **Images hotlinked to dead third-party hosts cannot be recovered.** Old forum posts overwhelmingly embed images from Photobucket, Flickr and similar, most of which stopped serving years ago. On one sampled photo thread, 60 of 116 images were already broken on the live site. Those become an explicit "Image unavailable in this archive" placeholder — the archive is honest about them, but the pictures are gone from the web, not merely un-archived.
+- **Crawl ordering is fair, not smart.** Rotating the frontier across discovering pages stops any one page monopolising the budget, but it does not rank pages by how interesting they are. A budgeted capture gets a spread across the site's structure rather than the "best" pages, because the tool has no basis for judging which those are.
 - **This is an MVP**: unsigned builds only, no auto-update, no accessibility audit performed.
 
 ## Roadmap (post-MVP, prioritized)
 
-1. **Run the built Windows installer/portable exe on real Windows hardware** and fix whatever that surfaces — the build itself is produced and structurally valid (see Packaging), but has not been executed on Windows (untested in this environment — see Known Limitations).
-3. **Archive integrity hashing** (content hash recorded at capture time, verified on open) to detect tampering or bit rot.
-4. **Packaged app icons** and proper `build/` resources for macOS/Windows.
-5. **Code signing + notarization** for macOS, code signing for Windows, so builds can be distributed publicly without OS warnings.
-6. **Auto-update** via `electron-updater`, pointed at a release channel once signed builds exist.
-7. **Dependency audit in CI** (`npm audit` / `osv-scanner`) and a documented update cadence for Electron itself.
-8. **Parallel crawling** for `.sitearchive` site captures (the concurrency setting is plumbed through but the crawl is currently sequential — see Known Limitations).
-9. **Search inside a `.sitearchive`**, using the `index.sqlite` catalog and the per-page extracted text that already ship in the container.
-10. **Resume-only retry** for failed pages, instead of re-running the whole capture.
-11. **Full-text search ranking/snippets** in the Library (currently exact FTS5 match, no relevance snippet preview).
-12. **True multi-window support.**
-13. **Export/import of the whole library** (not just per-archive export), for migrating between machines.
-14. **Accessibility pass** on the trusted UI (keyboard navigation, screen reader labeling).
+1. **A UI for recovering an interrupted capture** — the checkpoint/resume machinery exists and is tested, but nothing surfaces it to the user (see Known Limitations). Needs a startup prompt or Library entry offering Finish / Resume / Discard.
+2. **Per-page memory telemetry over a long crawl**, to identify what actually kills the process on very large unlimited captures (see Known Limitations — the previously suspected cause was measured and ruled out).
+3. **Run the built Windows installer/portable exe on real Windows hardware** and fix whatever that surfaces — the build itself is produced and structurally valid (see Packaging), but has not been executed on Windows (untested in this environment — see Known Limitations).
+4. **Archive integrity hashing** (content hash recorded at capture time, verified on open) to detect tampering or bit rot.
+5. **Packaged app icons** and proper `build/` resources for macOS/Windows.
+6. **Code signing + notarization** for macOS, code signing for Windows, so builds can be distributed publicly without OS warnings.
+7. **Auto-update** via `electron-updater`, pointed at a release channel once signed builds exist.
+8. **Dependency audit in CI** (`npm audit` / `osv-scanner`) and a documented update cadence for Electron itself.
+9. **Parallel crawling** for `.sitearchive` site captures (the concurrency setting is plumbed through but the crawl is currently sequential — see Known Limitations).
+10. **Search inside a `.sitearchive`**, using the `index.sqlite` catalog and the per-page extracted text that already ship in the container.
+11. **Resume-only retry** for failed pages, instead of re-running the whole capture.
+12. **Full-text search ranking/snippets** in the Library (currently exact FTS5 match, no relevance snippet preview).
+13. **True multi-window support.**
+14. **Export/import of the whole library** (not just per-archive export), for migrating between machines.
+15. **Accessibility pass** on the trusted UI (keyboard navigation, screen reader labeling).
 
 ---
 

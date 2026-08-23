@@ -14,9 +14,253 @@ import type {
 } from '../../shared/sitearchiveTypes';
 import { SITEARCHIVE_FORMAT_VERSION } from '../../shared/sitearchiveTypes';
 import { logger } from '../util/logger';
+import { hostOf } from './urlNormalize';
+import {
+  CHECKPOINT_JOURNAL_FILE,
+  CHECKPOINT_LOCK_FILE,
+  CHECKPOINT_META_FILE,
+  isStagingDirLive,
+  readCheckpointMeta,
+  replayCheckpoint,
+  type CaptureCheckpointMeta,
+  type CaptureJournal,
+  type ReplayedCheckpoint,
+} from './captureJournal';
 
 export function sha256(data: Buffer | string): string {
   return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+const STAGING_PREFIX = 'sitearchive-staging-';
+
+/** Ceiling on the manifest's failure list. */
+const MAX_FAILURES = 5000;
+/** Per-kind ceiling for skips, so they can't crowd out real failures. */
+const MAX_FAILURES_PER_SKIP_KIND = 500;
+
+/** Recovery scaffolding that lives in the staging tree but never ships. */
+const CHECKPOINT_FILES: ReadonlySet<string> = new Set([CHECKPOINT_META_FILE, CHECKPOINT_JOURNAL_FILE, CHECKPOINT_LOCK_FILE]);
+
+/**
+ * Don't touch a staging tree that has been written to recently -- it may
+ * belong to a capture running right now in another instance (the e2e
+ * suite launches the real app, and `app.getPath('temp')` is shared with
+ * whatever the user already has open).
+ */
+const STAGING_STALE_AFTER_MS = 60 * 60 * 1000;
+
+/**
+ * How long a *recoverable* staging tree is kept.
+ *
+ * These hold real captured work that the user can still finish or resume,
+ * so they are not ordinary garbage -- but they can be gigabytes, so they
+ * don't get to live forever either.
+ */
+const RECOVERABLE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface RecoverableCapture {
+  stagingDir: string;
+  meta: CaptureCheckpointMeta;
+  /** Newest write anywhere in the tree -- when the capture actually died. */
+  lastWriteMs: number;
+  bytesOnDisk: number;
+}
+
+/**
+ * Staging trees from interrupted captures that still hold recoverable work.
+ *
+ * Ordered newest-first, so the most recently interrupted capture -- the one
+ * a user is most likely asking about -- comes first.
+ */
+export async function listRecoverableCaptures(tmpRoot: string): Promise<RecoverableCapture[]> {
+  const found: RecoverableCapture[] = [];
+
+  let entries: string[];
+  try {
+    entries = await fs.readdir(tmpRoot);
+  } catch {
+    return found;
+  }
+
+  for (const entry of entries) {
+    if (!entry.startsWith(STAGING_PREFIX)) continue;
+    const dir = path.join(tmpRoot, entry);
+    try {
+      if (!(await fs.stat(dir)).isDirectory()) continue;
+      const meta = await readCheckpointMeta(dir);
+      if (!meta) continue;
+      // A capture actively running right now -- possibly in another app
+      // instance sharing this OS temp directory -- must never be offered
+      // as "recoverable": finalizing or resuming it here would race with
+      // that instance's live journal appends and staged-file writes.
+      if (await isStagingDirLive(dir)) continue;
+      found.push({
+        stagingDir: dir,
+        meta,
+        lastWriteMs: await newestMtimeMs(dir),
+        bytesOnDisk: await directorySize(dir),
+      });
+    } catch {
+      // Unreadable directory: not recoverable, leave it to the sweep.
+    }
+  }
+
+  return found.sort((a, b) => b.lastWriteMs - a.lastWriteMs);
+}
+
+/**
+ * Turn an interrupted capture into a valid `.sitearchive` covering the
+ * pages it did manage to capture, without crawling any further.
+ *
+ * This is the "I don't want to redo two and a half hours, just give me
+ * what you got" path. The result is a complete, checksum-consistent
+ * container -- it simply holds fewer pages than the crawl intended, and
+ * its failure list records that it stopped early.
+ */
+export async function finalizeRecoveredCapture(
+  stagingDir: string,
+  appVersion: string,
+): Promise<{ archivePath: string; pageCount: number; assetCount: number; fileSizeBytes: number } | null> {
+  const checkpoint = await replayCheckpoint(stagingDir);
+  if (!checkpoint) return null;
+
+  const builder = new SiteArchiveBuilder(checkpoint.meta.archiveId, appVersion);
+  await builder.initForResume(stagingDir);
+  builder.restore(checkpoint);
+
+  if (checkpoint.queue.length > 0) {
+    // Say so inside the archive rather than letting it look complete.
+    await builder.addFailure({
+      url: checkpoint.meta.startUrl,
+      kind: 'cancelled',
+      message: `Capture was interrupted before finishing; ${checkpoint.queue.length} discovered page(s) were never captured.`,
+      discoveredOn: null,
+    });
+  }
+
+  const { fileSizeBytes } = await builder.finalize({
+    finalPath: checkpoint.meta.outputPath,
+    startUrl: checkpoint.meta.startUrl,
+    startFinalUrl: checkpoint.meta.startUrl,
+    siteTitle: checkpoint.siteTitle || hostOf(checkpoint.meta.startUrl) || 'website',
+    scope: checkpoint.meta.scope,
+  });
+
+  const pageCount = builder.pageCount;
+  const assetCount = builder.assetCount;
+  await builder.cleanup();
+
+  logger.info('sitearchive.recovered_partial', {
+    archiveId: checkpoint.meta.archiveId,
+    pages: pageCount,
+    neverCaptured: checkpoint.queue.length,
+  });
+
+  return { archivePath: checkpoint.meta.outputPath, pageCount, assetCount, fileSizeBytes };
+}
+
+/** Discard an interrupted capture and everything it staged. */
+export async function discardRecoveredCapture(stagingDir: string): Promise<void> {
+  await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/**
+ * Remove staging trees left behind by captures that never finished.
+ *
+ * `cleanup()` runs in a `finally`, so an ordinary failure or cancel tidies
+ * up after itself -- but a killed process (OOM, power loss, force quit)
+ * never gets there, and the staging tree for a large crawl is gigabytes.
+ * Nothing else ever deletes it, so without this it stays in the OS temp
+ * directory permanently. The Library has the equivalent protection for its
+ * own `.tmp-*` directories in `util/atomicWrite.ts`.
+ */
+export async function sweepSiteArchiveStaging(
+  tmpRoot: string,
+  now = Date.now(),
+): Promise<{ removed: string[]; bytesFreed: number }> {
+  const removed: string[] = [];
+  let bytesFreed = 0;
+
+  let entries: string[];
+  try {
+    entries = await fs.readdir(tmpRoot);
+  } catch {
+    return { removed, bytesFreed };
+  }
+
+  for (const entry of entries) {
+    if (!entry.startsWith(STAGING_PREFIX)) continue;
+    const dir = path.join(tmpRoot, entry);
+
+    try {
+      if (!(await fs.stat(dir)).isDirectory()) continue;
+      const idleMs = now - (await newestMtimeMs(dir));
+      if (idleMs < STAGING_STALE_AFTER_MS) continue;
+
+      // A checkpointed tree is recoverable work, not garbage: the user can
+      // still finish it into a partial archive or resume the crawl. Give
+      // it a long grace period rather than the ordinary one, so the fix
+      // for leaked staging directories can't quietly delete a crawl that
+      // died overnight.
+      if (idleMs < RECOVERABLE_RETENTION_MS && (await readCheckpointMeta(dir)) !== null) continue;
+
+      const size = await directorySize(dir);
+      await fs.rm(dir, { recursive: true, force: true });
+      removed.push(entry);
+      bytesFreed += size;
+    } catch {
+      // A dir that vanished or can't be read is not worth failing startup.
+    }
+  }
+
+  if (removed.length > 0) {
+    logger.info('sitearchive.swept_staging', { count: removed.length, bytesFreed });
+  }
+  return { removed, bytesFreed };
+}
+
+/**
+ * Newest mtime of the staging dir or any of its immediate children.
+ *
+ * The directory's own mtime is not enough: a running capture writes into
+ * `assets/`, `pages/` and friends, which never touches the parent's mtime,
+ * so a long crawl would look untouched and be eligible for deletion.
+ */
+async function newestMtimeMs(dir: string): Promise<number> {
+  let newest = 0;
+  try {
+    newest = (await fs.stat(dir)).mtimeMs;
+    for (const child of await fs.readdir(dir)) {
+      try {
+        newest = Math.max(newest, (await fs.stat(path.join(dir, child))).mtimeMs);
+      } catch {
+        /* raced with a delete */
+      }
+    }
+  } catch {
+    /* fall back to whatever we have */
+  }
+  return newest;
+}
+
+async function directorySize(dir: string): Promise<number> {
+  let total = 0;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry);
+    try {
+      const stat = await fs.stat(full);
+      total += stat.isDirectory() ? await directorySize(full) : stat.size;
+    } catch {
+      /* raced with a delete */
+    }
+  }
+  return total;
 }
 
 const EXT_BY_CONTENT_TYPE: Record<string, string> = {
@@ -78,26 +322,77 @@ export class SiteArchiveBuilder {
   private responses = new Map<string, ArchivedResponseEntry>();
   private routes = new Map<string, RouteMapEntry>();
   private failures: CaptureFailureEntry[] = [];
+  private failureCountsByKind = new Map<string, number>();
   private stagingDir: string | null = null;
   private totalUncompressed = 0;
+  private journal: CaptureJournal | null = null;
 
   constructor(
     readonly archiveId: string,
     private readonly appVersion: string,
   ) {}
 
+  static stagingDirFor(tmpRoot: string, archiveId: string): string {
+    return path.join(tmpRoot, `${STAGING_PREFIX}${archiveId}`);
+  }
+
   async init(tmpRoot: string): Promise<void> {
-    this.stagingDir = path.join(tmpRoot, `sitearchive-staging-${this.archiveId}`);
+    this.stagingDir = SiteArchiveBuilder.stagingDirFor(tmpRoot, this.archiveId);
     await fs.rm(this.stagingDir, { recursive: true, force: true });
-    await fs.mkdir(path.join(this.stagingDir, 'pages'), { recursive: true });
-    await fs.mkdir(path.join(this.stagingDir, 'assets'), { recursive: true });
-    await fs.mkdir(path.join(this.stagingDir, 'screenshots'), { recursive: true });
-    await fs.mkdir(path.join(this.stagingDir, 'responses'), { recursive: true });
+    await this.ensureStagingLayout();
+  }
+
+  /**
+   * Adopt an existing staging tree from an interrupted capture.
+   *
+   * Deliberately does not wipe anything: the whole point is that the bytes
+   * captured before the crash are still there and only the bookkeeping
+   * needs rebuilding, via `restore()`.
+   */
+  async initForResume(stagingDir: string): Promise<void> {
+    this.stagingDir = stagingDir;
+    await this.ensureStagingLayout();
+  }
+
+  private async ensureStagingLayout(): Promise<void> {
+    const staging = this.requireStaging();
+    for (const sub of ['pages', 'assets', 'screenshots', 'responses']) {
+      await fs.mkdir(path.join(staging, sub), { recursive: true });
+    }
+  }
+
+  get stagingPath(): string | null {
+    return this.stagingDir;
+  }
+
+  setJournal(journal: CaptureJournal | null): void {
+    this.journal = journal;
+  }
+
+  /** Rehydrate from a replayed journal, before the crawl continues. */
+  restore(checkpoint: ReplayedCheckpoint): void {
+    this.pages = checkpoint.pages;
+    this.pageNormalizedUrls = new Set(checkpoint.pages.map((p) => p.normalizedUrl));
+    this.assets = checkpoint.assets;
+    this.responses = checkpoint.responses;
+    this.routes = checkpoint.routes;
+    this.failures = checkpoint.failures;
+    this.failureCountsByKind = new Map();
+    for (const f of checkpoint.failures) {
+      this.failureCountsByKind.set(f.kind, (this.failureCountsByKind.get(f.kind) ?? 0) + 1);
+    }
+    this.totalUncompressed = checkpoint.totalUncompressed;
   }
 
   private requireStaging(): string {
     if (!this.stagingDir) throw new Error('SiteArchiveBuilder.init() was not called');
     return this.stagingDir;
+  }
+
+  /** Set a route and record it, so the route map survives a crash. */
+  private async setRoute(entry: RouteMapEntry): Promise<void> {
+    this.routes.set(entry.normalizedUrl, entry);
+    await this.journal?.append({ t: 'route', e: entry });
   }
 
   get totalBytes(): number {
@@ -133,7 +428,10 @@ export class SiteArchiveBuilder {
     const hash = sha256(data);
     const existing = this.assets.get(hash);
     if (existing) {
-      if (sourceUrl && !existing.sourceUrls.includes(sourceUrl)) existing.sourceUrls.push(sourceUrl);
+      if (sourceUrl && !existing.sourceUrls.includes(sourceUrl)) {
+        existing.sourceUrls.push(sourceUrl);
+        await this.journal?.append({ t: 'assetUrl', sha: hash, url: sourceUrl });
+      }
       return existing;
     }
 
@@ -152,6 +450,9 @@ export class SiteArchiveBuilder {
       ...(screenshotFallback ? { screenshotFallback } : {}),
     };
     this.assets.set(hash, entry);
+    // Journalled only after the bytes are on disk, so a replayed journal
+    // can never name an asset file that isn't there.
+    await this.journal?.append({ t: 'asset', e: entry });
     return entry;
   }
 
@@ -175,7 +476,8 @@ export class SiteArchiveBuilder {
       status,
     };
     this.responses.set(hash, entry);
-    this.routes.set(normalizedUrl, { normalizedUrl, target: { type: 'response', sha256: hash } });
+    await this.journal?.append({ t: 'response', e: entry });
+    await this.setRoute({ normalizedUrl, target: { type: 'response', sha256: hash } });
     return entry;
   }
 
@@ -236,25 +538,49 @@ export class SiteArchiveBuilder {
     };
     this.pages.push(entry);
     this.pageNormalizedUrls.add(input.normalizedUrl);
+    await this.journal?.append({ t: 'page', e: entry });
 
     // Route the page's own URL, plus every URL that redirected to it, so
     // links to any point in the redirect chain resolve offline.
-    this.routes.set(input.normalizedUrl, { normalizedUrl: input.normalizedUrl, target: { type: 'page', pageId: input.pageId } });
+    await this.setRoute({ normalizedUrl: input.normalizedUrl, target: { type: 'page', pageId: input.pageId } });
     for (const from of input.redirectedFrom) {
-      this.routes.set(from, { normalizedUrl: from, target: { type: 'page', pageId: input.pageId } });
+      await this.setRoute({ normalizedUrl: from, target: { type: 'page', pageId: input.pageId } });
     }
     return entry;
   }
 
   /** Point a normalized URL at an already-stored asset (for rewritten links). */
-  routeAsset(normalizedUrl: string, sha: string): void {
-    this.routes.set(normalizedUrl, { normalizedUrl, target: { type: 'asset', sha256: sha } });
+  async routeAsset(normalizedUrl: string, sha: string): Promise<void> {
+    await this.setRoute({ normalizedUrl, target: { type: 'asset', sha256: sha } });
   }
 
-  addFailure(failure: CaptureFailureEntry): void {
+  async addFailure(failure: CaptureFailureEntry): Promise<void> {
     // Keep the list bounded so a pathological crawl can't grow the
     // manifest without limit.
-    if (this.failures.length < 5000) this.failures.push(failure);
+    if (this.failures.length >= MAX_FAILURES) return;
+
+    // Skips are cheap and numerous; genuine failures are what the user
+    // needs to see. Without a separate ceiling, a link-dense site's skips
+    // reach the global cap first and every later fetch failure or timeout
+    // is silently dropped.
+    if (failure.kind.startsWith('skipped-')) {
+      const seen = (this.failureCountsByKind.get(failure.kind) ?? 0) + 1;
+      this.failureCountsByKind.set(failure.kind, seen);
+      if (seen > MAX_FAILURES_PER_SKIP_KIND) {
+        if (seen === MAX_FAILURES_PER_SKIP_KIND + 1) {
+          logger.info('sitearchive.skip_list_truncated', { kind: failure.kind });
+        }
+        return;
+      }
+    }
+
+    this.failures.push(failure);
+    await this.journal?.append({ t: 'failure', e: failure });
+  }
+
+  /** How many of each skip kind were seen, including any past the cap. */
+  get skipCounts(): ReadonlyMap<string, number> {
+    return this.failureCountsByKind;
   }
 
   get failureList(): CaptureFailureEntry[] {
@@ -372,7 +698,7 @@ export class SiteArchiveBuilder {
     await fs.mkdir(path.dirname(input.finalPath), { recursive: true });
 
     try {
-      await zipDirectory(staging, tmpOut);
+      await zipDirectory(staging, tmpOut, CHECKPOINT_FILES);
       // Only now does the .sitearchive name start pointing at these bytes.
       await fs.rename(tmpOut, input.finalPath);
     } catch (err) {
@@ -398,7 +724,7 @@ export class SiteArchiveBuilder {
   }
 }
 
-function zipDirectory(sourceDir: string, destZipPath: string): Promise<void> {
+function zipDirectory(sourceDir: string, destZipPath: string, exclude: ReadonlySet<string>): Promise<void> {
   return new Promise((resolve, reject) => {
     void (async () => {
       try {
@@ -409,7 +735,15 @@ function zipDirectory(sourceDir: string, destZipPath: string): Promise<void> {
         output.on('error', (err: unknown) => reject(err));
         archive.on('error', (err: unknown) => reject(err));
         archive.pipe(output);
-        archive.directory(sourceDir, false);
+        // Returning false from the entry callback drops that entry. The
+        // crash-recovery journal lives in the staging tree but is
+        // scaffolding, not archive content -- and it records the output
+        // path and full URLs, which have no business being shipped inside
+        // a file people share. Filtered rather than deleted so the capture
+        // stays recoverable right up until the zip succeeds.
+        archive.directory(sourceDir, false, (entry: { name: string }) =>
+          exclude.has(entry.name) ? false : entry,
+        );
         void archive.finalize();
       } catch (err) {
         reject(err);

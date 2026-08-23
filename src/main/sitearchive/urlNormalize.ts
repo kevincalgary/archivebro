@@ -171,6 +171,36 @@ export function looksDestructive(rawUrl: string): boolean {
 }
 
 /**
+ * Routes that are site plumbing rather than content: sign-in and account
+ * flows, search endpoints, "start a new thread" forms, and per-user
+ * profile pages.
+ *
+ * These matter because a page budget is finite. A forum front page offers
+ * dozens of them (rangerovers.net: 21 member profiles and 22 utility
+ * pages out of 86 links), and every one captured is a thread not
+ * captured. None of them archive usefully either -- a login form or a
+ * search box is inert offline.
+ *
+ * Deliberately narrow. Anything ambiguous is left crawlable, because
+ * wrongly skipping real content is a worse failure than wasting a slot,
+ * and every skip is recorded as a `skipped-non-content` failure so it is
+ * visible in the archive rather than silent.
+ */
+const NON_CONTENT_PATH_RE =
+  /(^|\/)(login|log-in|signin|sign-in|register|signup|sign-up|lostpassword|lost-password|forgot-password|search|members|member|profile|profiles|account|preferences|new-thread|create-thread|post-thread|new-topic|reply|subscribe|watched|bookmarks|conversations|notifications|cart|checkout)(\/|$)/i;
+/** Query-driven equivalents, e.g. `?do=login` or `?action=search`. */
+const NON_CONTENT_PARAM_RE = /\b(do|action|mode|view)=(login|register|search|newthread|newreply|profile|account)\b/i;
+
+export function looksNonContent(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    return NON_CONTENT_PATH_RE.test(u.pathname) || NON_CONTENT_PARAM_RE.test(u.search);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Heuristics for classic crawler traps: infinite calendars, endlessly
  * generated query permutations, and pathological path repetition. These
  * are heuristics -- they bound worst-case crawls rather than guaranteeing

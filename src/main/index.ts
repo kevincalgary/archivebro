@@ -1,6 +1,6 @@
 import { app, session, BrowserWindow } from 'electron';
 import path from 'node:path';
-import { initLogger, logger, setDiagnosticLogging } from './util/logger';
+import { initLogger, logger, redactUrl, setDiagnosticLogging } from './util/logger';
 import { openDatabase, closeDatabase } from './db/database';
 import { ArchiveRepo } from './db/archiveRepo';
 import { SettingsStore } from './settings/settingsStore';
@@ -15,6 +15,7 @@ import { enforceStoragePolicies } from './settings/storageManager';
 import { Channels } from '../shared/ipcContract';
 import { installTestHooks } from './testHooks';
 import { CaptureManager } from './sitearchive/captureManager';
+import { listRecoverableCaptures, sweepSiteArchiveStaging } from './sitearchive/archiveWriter';
 import { registerArchiveSiteSchemeAsPrivileged, closeAllOpenedArchives } from './sitearchive/sitearchiveSession';
 import { setPermissionPromptEmitter, denyAllPendingPermissions } from './security/permissionPrompts';
 import { SITEARCHIVE_EXTENSION } from '../shared/sitearchiveTypes';
@@ -83,6 +84,23 @@ async function main(): Promise<void> {
   const archiveRepo = new ArchiveRepo(db);
 
   await recoverFromInterruptedCaptures(archiveRepo, settings.get().archiveStorageDir);
+  // A capture killed mid-crawl leaves gigabytes in the OS temp directory
+  // that nothing else ever reclaims. Checkpointed trees are spared -- they
+  // hold work the user can still finish or resume. Both of these walk
+  // every staging tree under the temp root, which is slow with several
+  // leaked directories present (a real run left six, totalling 3.8 GB) --
+  // run them in the background rather than blocking window creation on
+  // temp-directory housekeeping the user can't see.
+  void (async () => {
+    await sweepSiteArchiveStaging(app.getPath('temp')).catch(() => undefined);
+    for (const recoverable of await listRecoverableCaptures(app.getPath('temp')).catch(() => [])) {
+      logger.info('sitearchive.recoverable_capture_found', {
+        archiveId: recoverable.meta.archiveId,
+        domain: redactUrl(recoverable.meta.startUrl),
+        bytesOnDisk: recoverable.bytesOnDisk,
+      });
+    }
+  })();
 
   // Library thumbnails in the trusted UI load through archive:// too,
   // rather than granting the trusted window raw file:// access to the

@@ -51,7 +51,7 @@ async function buildSampleArchive(finalPath: string) {
     redirectedFrom: ['https://example.com/about-us'],
   });
 
-  builder.addFailure({ url: 'https://example.com/missing', kind: 'http-error', message: '404', discoveredOn: 'https://example.com/' });
+  await builder.addFailure({ url: 'https://example.com/missing', kind: 'http-error', message: '404', discoveredOn: 'https://example.com/' });
 
   const { manifest, fileSizeBytes } = await builder.finalize({
     finalPath,

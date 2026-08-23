@@ -102,6 +102,11 @@ ${extraHead}
   <a href="/about">About</a>
   <a href="/products/widget">Widget</a>
   <a href="/deep/one">Deep</a>
+  <!-- Global nav non-content links, present on EVERY page, as on any real
+       site. These are what turn a per-link skip into one identical failure
+       entry per page crawled unless skips are deduplicated. -->
+  <a href="/forum/login">Log in</a>
+  <a href="/forum/search">Search</a>
 </nav>
 ${body}
 </body></html>`;
@@ -121,7 +126,8 @@ const routes = {
          <li><a href="/products/widget">Absolute path to Widget</a></li>
          <li><a href="http://127.0.0.1:1/offsite">Cross-origin link (never followed)</a></li>
          <li><a href="/about#section-two">Link with fragment</a></li>
-         <li><a href="/search?q=hello&amp;page=2">Link with query string</a></li>
+         <li><a href="/search?q=hello&amp;page=2">Link with query string (search: not content)</a></li>
+         <li><a href="/products/widget?variant=blue">Content page selected by a query string</a></li>
          <li><a href="/missing-page">Link to a page that 404s</a></li>
          <li><a href="/logout">Log out (destructive; must not be followed)</a></li>
          <li><a href="/loop/a">Recursive loop start</a></li>
@@ -307,6 +313,78 @@ const ASSETS = {
   '/font/fixture.woff': { body: FONT_BYTES, type: 'font/woff' },
 };
 
+/**
+ * A forum-shaped corner of the fixture site.
+ *
+ * Real forums bury their actual content two levels down: an index links to
+ * many section pages, and only a section page links to the threads. The
+ * index also links to a pile of things that are not content at all --
+ * login, register, search, member profiles. Proportions here mirror
+ * rangerovers.net's front page, scaled down: many hub links, almost no
+ * direct thread links.
+ *
+ * This shape is what starves a budgeted breadth-first crawl of threads,
+ * so it belongs in the fixtures rather than being discovered against
+ * somebody else's live server.
+ */
+const FORUM_SECTIONS = 12;
+const FORUM_THREADS_PER_SECTION = 6;
+const FORUM_MEMBERS = 8;
+const FORUM_UTILITY = ['/forum/login', '/forum/register', '/forum/search', '/forum/members', '/forum/new-thread', '/forum/help/faq'];
+
+function forumRoute(pathname) {
+  if (pathname === '/forum') {
+    const sections = Array.from({ length: FORUM_SECTIONS }, (_, i) => `<li><a href="/forum/section-${i + 1}">Section ${i + 1}</a></li>`);
+    const members = Array.from({ length: FORUM_MEMBERS }, (_, i) => `<li><a href="/forum/members/user-${i + 1}">User ${i + 1}</a></li>`);
+    const utility = FORUM_UTILITY.map((u) => `<li><a href="${u}">${u}</a></li>`);
+    return {
+      body: layout(
+        'Fixture Forum',
+        `<h1>Fixture Forum</h1>
+         <ul class="sections">${sections.join('')}</ul>
+         <ul class="members">${members.join('')}</ul>
+         <ul class="utility">${utility.join('')}</ul>`,
+      ),
+    };
+  }
+
+  const section = /^\/forum\/section-(\d+)$/.exec(pathname);
+  if (section) {
+    const s = Number(section[1]);
+    if (s < 1 || s > FORUM_SECTIONS) return null;
+    const threads = Array.from(
+      { length: FORUM_THREADS_PER_SECTION },
+      (_, j) => `<li><a href="/forum/thread-${s}-${j + 1}">Thread ${s}-${j + 1}</a></li>`,
+    );
+    return { body: layout(`Section ${s}`, `<h1>Section ${s}</h1><ul class="threads">${threads.join('')}</ul>`) };
+  }
+
+  const thread = /^\/forum\/thread-(\d+)-(\d+)$/.exec(pathname);
+  if (thread) {
+    const [, s, j] = thread;
+    return {
+      body: layout(
+        `Thread ${s}-${j}`,
+        `<h1>Thread ${s}-${j}</h1>
+         <div class="post"><p>First post in thread ${s}-${j}. This is the content someone actually wants archived.</p></div>
+         <div class="post"><p>A reply in thread ${s}-${j}.</p></div>
+         <a href="/forum/section-${s}">Back to Section ${s}</a>`,
+      ),
+    };
+  }
+
+  const member = /^\/forum\/members\/user-(\d+)$/.exec(pathname);
+  if (member) {
+    return { body: layout(`User ${member[1]}`, `<h1>User ${member[1]}</h1><p>Member profile, not forum content.</p>`) };
+  }
+
+  if (FORUM_UTILITY.includes(pathname)) {
+    return { body: layout(pathname, `<h1>${pathname}</h1><p>Utility page, not forum content.</p>`) };
+  }
+
+  return null;
+}
+
 function startSiteFixtureServer(port = 0) {
   let requestCount = 0;
   const requestLog = [];
@@ -329,6 +407,12 @@ function startSiteFixtureServer(port = 0) {
 
       const route = routes[url.pathname];
       if (!route) {
+        const forum = forumRoute(url.pathname);
+        if (forum) {
+          res.writeHead(forum.status ?? 200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(forum.body);
+          return;
+        }
         res.writeHead(404, { 'Content-Type': 'text/html' });
         res.end(layout('Not Found', '<h1>404</h1>'));
         return;

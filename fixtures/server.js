@@ -62,6 +62,19 @@ const routes = {
     status: 200,
     body: html('Broken Resource', '<h1>Broken Resource</h1><img src="/does-not-exist.png" alt="missing">'),
   }),
+  // A page big enough on both axes that rasterizing it at the display's
+  // device pixel ratio costs far more memory than the capture budget is
+  // supposed to allow. Real marketing pages are routinely this size.
+  '/tall-page': () => ({
+    status: 200,
+    body: html(
+      'Tall Page',
+      '<h1>Tall Page</h1>' +
+        Array.from({ length: 120 })
+          .map((_, i) => `<p style="height:100px;width:2400px;margin:0">block ${i}</p>`)
+          .join(''),
+    ),
+  }),
 };
 
 function startFixtureServer(port = 0) {

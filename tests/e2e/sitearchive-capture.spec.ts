@@ -155,6 +155,10 @@ test.describe('.sitearchive capture', () => {
         expect(urls).toContain(`${site.url}/about`);
         expect(urls).toContain(`${site.url}/products/widget`);
         expect(urls.some((u) => u.includes('/deep/one'))).toBe(true);
+        // A query string that selects content is followed and kept
+        // distinct from the bare URL (search endpoints are skipped as
+        // non-content, so this needs a real content URL to be meaningful).
+        expect(urls).toContain(`${site.url}/products/widget?variant=blue`);
       } finally {
         archive.close();
       }

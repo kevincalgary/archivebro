@@ -10,6 +10,8 @@ import type {
 import { SCOPE_HARD_LIMITS, MIN_FREE_DISK_BYTES } from '../../shared/sitearchiveTypes';
 import { getDiskSpace } from '../capture/diskSpace';
 import { SiteArchiveBuilder } from './archiveWriter';
+import { CaptureJournal, type ReplayedCheckpoint } from './captureJournal';
+import { CrawlFrontier } from './crawlFrontier';
 import { capturePage, type DiscoveredLink } from './pageCapture';
 import {
   hostOf,
@@ -18,6 +20,7 @@ import {
   isInScope,
   looksDestructive,
   looksLikeCrawlerTrap,
+  looksNonContent,
   normalizeUrl,
 } from './urlNormalize';
 import { logger, redactUrl } from '../util/logger';
@@ -28,6 +31,12 @@ interface QueueItem {
   url: string;
   depth: number;
   discoveredOn: string | null;
+}
+
+/** Everything needed to pick a killed capture back up where it stopped. */
+export interface ResumeState {
+  stagingDir: string;
+  checkpoint: ReplayedCheckpoint;
 }
 
 const RESOURCE_TIMEOUT_MS = 20_000;
@@ -56,6 +65,29 @@ const ASSET_CONCURRENCY_WITH_MEDIA = 3;
 /** Rebuild the crawling view this often, to bound renderer memory growth. */
 const PAGES_PER_VIEW_RECYCLE = 20;
 const MAX_REDIRECTS_PER_PAGE = 10;
+/**
+ * Consecutive viewport-only screenshot fallbacks before the view is
+ * rebuilt early.
+ *
+ * Observed on a real 810-page crawl: after page 346 every single
+ * remaining page fell back to a viewport crop -- 464 in a row, with no
+ * recovery -- while the capture still reported success. Whatever wedges
+ * the renderer that way survives an ordinary page navigation, so a run of
+ * failures is treated as a signal to tear the view down early rather than
+ * something to keep quietly absorbing.
+ */
+const MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS = 3;
+/**
+ * Wall-clock ceiling for capturing a single page.
+ *
+ * A real forum photo thread (116 images, 27 dead third-party hosts, heavy
+ * ad tags) ran over 15 minutes on one page without finishing. Nothing
+ * bounded it: navigation and each individual fetch have timeouts, but the
+ * capture phases had no collective limit, so one page could hold a crawl
+ * open forever. Two minutes is far above a normal page (~7s measured on a
+ * large marketing site) and still lets a 50,000-page crawl make progress.
+ */
+const PAGE_CAPTURE_BUDGET_MS = 120_000;
 
 /**
  * Crawls a site within scope and writes a .sitearchive.
@@ -72,8 +104,19 @@ const MAX_REDIRECTS_PER_PAGE = 10;
 export class CaptureJob {
   readonly jobId = crypto.randomUUID();
   private builder: SiteArchiveBuilder;
-  private queue: QueueItem[] = [];
+  private queue = new CrawlFrontier();
   private queuedOrDone = new Set<string>();
+  /**
+   * Normalized URLs already recorded as skipped.
+   *
+   * Skips are decided in discoverLinks, before enqueue() -- so they never
+   * reach the queuedOrDone dedupe. Without this, a link in the site's
+   * global navigation (a "Log in" or "Members" link on every page) records
+   * an identical failure entry once per page crawled, filling the capture's
+   * failure list with hundreds of copies of the same skip and pushing out
+   * the real failures the user needs to see.
+   */
+  private skippedUrls = new Set<string>();
   private state: CaptureProgress['state'] = 'preparing';
   private pausedPromise: Promise<void> | null = null;
   private resumeFn: (() => void) | null = null;
@@ -86,6 +129,12 @@ export class CaptureJob {
   private siteTitle = '';
   private listeners: ProgressListener[] = [];
   private view: WebContentsView | null = null;
+  private consecutiveScreenshotDegradations = 0;
+  private degradedScreenshotCount = 0;
+  private forceViewRecycle = false;
+  private journal: CaptureJournal | null = null;
+  /** Set when the run failed in a way the user could still recover from. */
+  private keepStagingForRecovery = false;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -93,8 +142,16 @@ export class CaptureJob {
     private readonly startUrl: string,
     private readonly scope: CaptureScope,
     private readonly outputPath: string,
+    private readonly resumeFrom: ResumeState | null = null,
   ) {
-    this.builder = new SiteArchiveBuilder(crypto.randomUUID(), app.getVersion());
+    // A resumed capture must keep the original archive id: it is baked
+    // into the `archive-site://<archiveId>` origins already serialized
+    // into every page captured before the interruption, and into the
+    // staging directory's name.
+    this.builder = new SiteArchiveBuilder(
+      resumeFrom?.checkpoint.meta.archiveId ?? crypto.randomUUID(),
+      app.getVersion(),
+    );
   }
 
   onProgress(listener: ProgressListener): void {
@@ -173,31 +230,58 @@ export class CaptureJob {
       throw new Error('Capture can only start from an http(s) page');
     }
 
-    await this.builder.init(app.getPath('temp'));
-
-    this.createView();
-
-    this.state = 'running';
     const startNormalized = normalizeUrl(this.startUrl);
     if (!startNormalized) throw new Error('Start URL could not be normalized');
 
-    this.enqueue({ url: this.startUrl, depth: 0, discoveredOn: null });
+    if (this.resumeFrom) {
+      // Every byte captured before the interruption is still in the
+      // staging tree; only the bookkeeping needs rebuilding.
+      await this.builder.initForResume(this.resumeFrom.stagingDir);
+      this.builder.restore(this.resumeFrom.checkpoint);
+      this.restoreCrawlState(this.resumeFrom.checkpoint);
+      this.journal = await CaptureJournal.reopen(this.resumeFrom.stagingDir);
+      logger.info('sitearchive.capture_resumed', {
+        archiveId: this.builder.archiveId,
+        pagesAlreadyCaptured: this.pagesCompleted,
+        queueRemaining: this.queue.size,
+      });
+    } else {
+      await this.builder.init(app.getPath('temp'));
+      this.journal = await CaptureJournal.create(this.builder.stagingPath!, {
+        archiveId: this.builder.archiveId,
+        appVersion: app.getVersion(),
+        startUrl: this.startUrl,
+        outputPath: this.outputPath,
+        scope: this.scope,
+        startedAt: new Date().toISOString(),
+      });
+    }
+    this.builder.setJournal(this.journal);
+
+    this.createView();
+    this.state = 'running';
+
+    if (!this.resumeFrom) {
+      await this.enqueue({ url: this.startUrl, depth: 0, discoveredOn: null });
+    }
     this.emit();
 
     let startFinalUrl = this.startUrl;
 
     try {
-      while (this.queue.length > 0 && !this.cancelled) {
+      while (this.queue.size > 0 && !this.cancelled) {
         await this.waitIfPaused();
         if (this.cancelled) break;
 
         // A null limit means the user explicitly chose "no limit".
         if (this.scope.maxPages !== null && this.pagesCompleted >= this.scope.maxPages) {
           logger.info('sitearchive.page_limit_reached', { limit: this.scope.maxPages });
+          await this.recordLimitStop(`Stopped at the page limit of ${this.scope.maxPages}`);
           break;
         }
         if (this.scope.maxTotalBytes !== null && this.builder.totalBytes >= this.scope.maxTotalBytes) {
           logger.info('sitearchive.size_limit_reached', {});
+          await this.recordLimitStop('Stopped at the archive size limit');
           break;
         }
 
@@ -205,7 +289,7 @@ export class CaptureJob {
         // unlimited -- "no limit" must never mean "fill the user's drive".
         if (!(await hasFreeDiskSpace(app.getPath('temp'), MIN_FREE_DISK_BYTES))) {
           logger.warn('sitearchive.stopped_low_disk', {});
-          this.builder.addFailure({
+          await this.builder.addFailure({
             url: this.currentUrl ?? this.startUrl,
             kind: 'too-large',
             message: 'Capture stopped: the disk is running out of free space.',
@@ -216,41 +300,68 @@ export class CaptureJob {
 
         const item = this.queue.shift()!;
         this.currentUrl = item.url;
+        // Recorded before the attempt, so a crawl resumed after a crash
+        // doesn't retry the page that was in flight when it died -- which
+        // is also the page most likely to have caused the death.
+        const itemNormalized = normalizeUrl(item.url);
+        if (itemNormalized) await this.journal?.append({ t: 'deq', norm: itemNormalized });
         this.emit();
 
         const captured = await this.capturePageSafely(item, startOrigin);
         if (captured?.isStart) startFinalUrl = captured.finalUrl;
 
+        await this.journal?.append({
+          t: 'stat',
+          bytesDownloaded: this.bytesDownloaded,
+          warnings: this.warningCount,
+          total: this.builder.totalBytes,
+          title: this.siteTitle,
+        });
+
         // Periodically rebuild the crawling view so a long, unlimited
-        // crawl doesn't accumulate renderer memory until it's killed.
-        if (this.pagesCompleted > 0 && this.pagesCompleted % PAGES_PER_VIEW_RECYCLE === 0 && this.queue.length > 0) {
+        // crawl doesn't accumulate renderer memory until it's killed --
+        // or early, if the renderer looks wedged.
+        const dueForRecycle = this.pagesCompleted > 0 && this.pagesCompleted % PAGES_PER_VIEW_RECYCLE === 0;
+        if ((dueForRecycle || this.forceViewRecycle) && this.queue.size > 0) {
+          this.forceViewRecycle = false;
           await this.recycleView();
         }
 
         // Politeness delay between page loads.
-        if (this.scope.crawlDelayMs > 0 && this.queue.length > 0) {
+        if (this.scope.crawlDelayMs > 0 && this.queue.size > 0) {
           await sleep(this.scope.crawlDelayMs);
         }
       }
 
       if (this.cancelled) {
         this.state = 'cancelled';
-        this.builder.addFailure({
+        await this.builder.addFailure({
           url: this.currentUrl ?? this.startUrl,
           kind: 'cancelled',
           message: 'Capture was cancelled by the user',
           discoveredOn: null,
         });
-        // Nothing is written to the final path on cancel, so no previous
-        // archive at that path is ever damaged.
-        await this.builder.cleanup();
         this.emitTerminal({ state: 'cancelled' });
+        // Cleanup happens in `finally`, after the journal handle is
+        // closed. Deleting the staging tree while the journal file inside
+        // it is still open can fail (e.g. EBUSY on Windows), and that
+        // failure must never be mistaken by the outer catch for a failed
+        // capture just because the user asked to cancel -- nothing is
+        // written to the final path on cancel, so no previous archive at
+        // that path is ever damaged either way.
         throw new CaptureCancelledError();
       }
 
       this.state = 'finalizing';
       this.currentUrl = null;
       this.emit();
+
+      if (this.degradedScreenshotCount > 0) {
+        logger.warn('sitearchive.screenshots_degraded_summary', {
+          degraded: this.degradedScreenshotCount,
+          pagesCompleted: this.pagesCompleted,
+        });
+      }
 
       const { fileSizeBytes } = await this.builder.finalize({
         finalPath: this.outputPath,
@@ -274,10 +385,25 @@ export class CaptureJob {
     } catch (err) {
       if (err instanceof CaptureCancelledError) throw err;
       this.state = 'failed';
+      // Keep the staging tree: it holds every page captured before the
+      // failure, and the journal beside it can turn that into a partial
+      // archive or resume the crawl. Discarding it here is exactly the
+      // behaviour that made a 151-minute crawl produce nothing.
+      this.keepStagingForRecovery = true;
+      logger.warn('sitearchive.capture_recoverable', {
+        archiveId: this.builder.archiveId,
+        stagingDir: this.builder.stagingPath ?? '',
+        pagesCompleted: this.pagesCompleted,
+      });
       this.emitTerminal({ state: 'failed', error: describe(err) });
       throw err;
     } finally {
-      await this.builder.cleanup().catch(() => {});
+      await this.journal?.close().catch(() => {});
+      this.journal = null;
+      this.builder.setJournal(null);
+      if (!this.keepStagingForRecovery) {
+        await this.builder.cleanup().catch(() => {});
+      }
       this.destroyView();
     }
   }
@@ -336,13 +462,45 @@ export class CaptureJob {
     this.view = null;
   }
 
-  private enqueue(item: QueueItem): void {
+  private async enqueue(item: QueueItem): Promise<void> {
     const normalized = normalizeUrl(item.url);
     if (!normalized) return;
     if (this.queuedOrDone.has(normalized)) return;
     this.queuedOrDone.add(normalized);
     this.queue.push(item);
     this.pagesDiscovered += 1;
+    await this.journal?.append({
+      t: 'enq',
+      url: item.url,
+      norm: normalized,
+      depth: item.depth,
+      on: item.discoveredOn,
+    });
+  }
+
+  /**
+   * Restore queue and counters from a replayed journal.
+   *
+   * The builder's own state is restored separately; this is the part that
+   * lives on the job rather than in the archive.
+   */
+  private restoreCrawlState(checkpoint: ReplayedCheckpoint): void {
+    // Re-pushing in the original enqueue order rebuilds the same buckets;
+    // only the rotation cursor restarts, which affects ordering slightly
+    // but never which pages are eligible.
+    this.queue = new CrawlFrontier();
+    for (const q of checkpoint.queue) {
+      this.queue.push({ url: q.url, depth: q.depth, discoveredOn: q.discoveredOn });
+    }
+    this.queuedOrDone = checkpoint.queuedOrDone;
+    this.pagesDiscovered = checkpoint.pagesDiscovered;
+    this.pagesCompleted = checkpoint.pagesCompleted;
+    this.bytesDownloaded = checkpoint.bytesDownloaded;
+    this.warningCount = checkpoint.warningCount;
+    this.siteTitle = checkpoint.siteTitle;
+    for (const f of checkpoint.failures) {
+      if (f.kind.startsWith('skipped-')) this.skippedUrls.add(normalizeUrl(f.url) ?? f.url);
+    }
   }
 
   private async capturePageSafely(
@@ -354,14 +512,14 @@ export class CaptureJob {
 
     const normalized = normalizeUrl(item.url);
     if (!normalized) {
-      this.recordFailure({ url: item.url, kind: 'skipped-non-http', message: 'Not an http(s) URL', discoveredOn: item.discoveredOn });
+      await this.recordFailure({ url: item.url, kind: 'skipped-non-http', message: 'Not an http(s) URL', discoveredOn: item.discoveredOn });
       return null;
     }
 
     try {
       const loaded = await this.loadUrl(view.webContents, item.url);
       if (!loaded.ok) {
-        this.recordFailure({
+        await this.recordFailure({
           url: item.url,
           kind: loaded.kind,
           message: loaded.message,
@@ -375,7 +533,7 @@ export class CaptureJob {
 
       // A redirect may have landed us somewhere already captured.
       if (finalNormalized !== normalized && this.builder.hasPageForNormalizedUrl(finalNormalized)) {
-        this.recordFailure({
+        await this.recordFailure({
           url: item.url,
           kind: 'skipped-duplicate',
           message: `Redirected to an already-captured page (${finalNormalized})`,
@@ -393,7 +551,7 @@ export class CaptureJob {
           includeExternalDomains: this.scope.includeExternalDomains,
         })
       ) {
-        this.recordFailure({
+        await this.recordFailure({
           url: item.url,
           kind: 'skipped-scope',
           message: `Redirected out of scope to ${finalUrl}`,
@@ -415,6 +573,7 @@ export class CaptureJob {
           maxResourceBytes: this.scope.includeMedia ? MAX_RESOURCE_BYTES_WITH_MEDIA : MAX_RESOURCE_BYTES,
           resourceTimeoutMs: RESOURCE_TIMEOUT_MS,
           assetConcurrency: this.scope.includeMedia ? ASSET_CONCURRENCY_WITH_MEDIA : ASSET_CONCURRENCY,
+          pageBudgetMs: PAGE_CAPTURE_BUDGET_MS,
         },
         {
           originalUrl: item.url,
@@ -430,15 +589,31 @@ export class CaptureJob {
       this.warningCount += result.warnings.length;
       if (!this.siteTitle) this.siteTitle = result.title;
 
+      if (result.screenshotDegraded) {
+        this.degradedScreenshotCount += 1;
+        this.consecutiveScreenshotDegradations += 1;
+        // Every Nth consecutive failure, not just the first: if the fresh
+        // view is wedged too, keep trying rather than giving up silently.
+        if (this.consecutiveScreenshotDegradations % MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS === 0) {
+          logger.warn('sitearchive.screenshots_degraded_recycling_view', {
+            consecutive: this.consecutiveScreenshotDegradations,
+            pagesCompleted: this.pagesCompleted,
+          });
+          this.forceViewRecycle = true;
+        }
+      } else {
+        this.consecutiveScreenshotDegradations = 0;
+      }
+
       // Discover further pages, unless we've hit the depth limit.
       if (this.scope.maxDepth === null || item.depth < this.scope.maxDepth) {
-        this.discoverLinks(result.links, finalUrl, item.depth + 1, startOrigin);
+        await this.discoverLinks(result.links, finalUrl, item.depth + 1, startOrigin);
       }
 
       this.emit();
       return { isStart: item.depth === 0, finalUrl };
     } catch (err) {
-      this.recordFailure({
+      await this.recordFailure({
         url: item.url,
         kind: 'render-failed',
         message: describe(err),
@@ -448,7 +623,12 @@ export class CaptureJob {
     }
   }
 
-  private discoverLinks(links: DiscoveredLink[], pageUrl: string, nextDepth: number, startOrigin: string): void {
+  private async discoverLinks(
+    links: DiscoveredLink[],
+    pageUrl: string,
+    nextDepth: number,
+    startOrigin: string,
+  ): Promise<void> {
     for (const link of links) {
       if (this.pagesDiscovered >= SCOPE_HARD_LIMITS.maxPages) return;
 
@@ -458,7 +638,7 @@ export class CaptureJob {
       // Never follow a link that looks like it performs an action, and
       // never follow links inside forms (they're usually submit-adjacent).
       if (looksDestructive(absolute)) {
-        this.recordFailure({ url: absolute, kind: 'skipped-sensitive', message: 'Link looks like a state-changing action', discoveredOn: pageUrl });
+        await this.recordSkip({ url: absolute, kind: 'skipped-sensitive', message: 'Link looks like a state-changing action', discoveredOn: pageUrl });
         continue;
       }
       if (link.insideForm) continue;
@@ -476,19 +656,60 @@ export class CaptureJob {
       }
 
       if (looksLikeCrawlerTrap(absolute)) {
-        this.recordFailure({ url: absolute, kind: 'skipped-trap', message: 'URL matched a crawler-trap heuristic', discoveredOn: pageUrl });
+        await this.recordSkip({ url: absolute, kind: 'skipped-trap', message: 'URL matched a crawler-trap heuristic', discoveredOn: pageUrl });
+        continue;
+      }
+
+      // Sign-in flows, search endpoints and member profiles are not
+      // archivable content, and on a link-dense site they crowd out the
+      // pages the user actually wanted.
+      if (looksNonContent(absolute)) {
+        await this.recordSkip({
+          url: absolute,
+          kind: 'skipped-non-content',
+          message: 'Account, search or navigation route rather than page content',
+          discoveredOn: pageUrl,
+        });
         continue;
       }
 
       // Downloadable documents are captured as assets, not crawled as pages.
       if (link.download) continue;
 
-      this.enqueue({ url: absolute, depth: nextDepth, discoveredOn: pageUrl });
+      await this.enqueue({ url: absolute, depth: nextDepth, discoveredOn: pageUrl });
     }
   }
 
-  private recordFailure(failure: CaptureFailureEntry): void {
-    this.builder.addFailure(failure);
+  /**
+   * Record that the crawl stopped early because of a scope limit.
+   *
+   * Without this an archive truncated by its budget is indistinguishable
+   * from one that captured the whole site -- which is how a forum capture
+   * that reached no threads at all still looked like a success.
+   */
+  private async recordLimitStop(reason: string): Promise<void> {
+    const remaining = this.queue.pending();
+    await this.recordFailure({
+      url: this.startUrl,
+      kind: 'stopped-at-limit',
+      message:
+        remaining.length > 0
+          ? `${reason}; ${remaining.length} discovered page(s) still queued and never captured.`
+          : `${reason}.`,
+      discoveredOn: null,
+    });
+  }
+
+  /** Record a per-link skip once, however many pages link to it. */
+  private async recordSkip(failure: CaptureFailureEntry): Promise<void> {
+    const key = normalizeUrl(failure.url) ?? failure.url;
+    if (this.skippedUrls.has(key)) return;
+    this.skippedUrls.add(key);
+    await this.recordFailure(failure);
+  }
+
+  private async recordFailure(failure: CaptureFailureEntry): Promise<void> {
+    await this.builder.addFailure(failure);
     this.emit();
   }
 

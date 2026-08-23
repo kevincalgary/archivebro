@@ -191,10 +191,18 @@ export type CaptureFailureKind =
   | 'skipped-duplicate'
   | 'skipped-trap'
   | 'skipped-sensitive'
+  /** A route that is navigation or account plumbing, not archivable content. */
+  | 'skipped-non-content'
+  /** A resource whose fetch was abandoned because the page's time budget ran out. */
+  | 'skipped-budget'
+  /** The crawl hit a scope limit with pages still queued. */
+  | 'stopped-at-limit'
   | 'redirect-loop'
   | 'render-failed'
   | 'serialize-failed'
-  | 'cancelled';
+  | 'cancelled'
+  /** Dequeued for capture, then the process died before recording any outcome. */
+  | 'interrupted';
 
 export interface CaptureFailureEntry {
   url: string;

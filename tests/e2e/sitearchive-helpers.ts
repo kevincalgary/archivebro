@@ -98,5 +98,25 @@ export function siteHooks(app: ElectronApplication) {
         ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.openSiteArchivePath(p),
         archivePath,
       ),
+    listRecoverableCaptures: (): Promise<
+      Array<{ stagingDir: string; archiveId: string; startUrl: string; outputPath: string; bytesOnDisk: number }>
+    > => app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.listRecoverableCaptures()),
+    finalizeRecoveredCapture: (
+      stagingDir: string,
+    ): Promise<{ archivePath: string; pageCount: number; assetCount: number; fileSizeBytes: number } | null> =>
+      app.evaluate(
+        ({}, d: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.finalizeRecoveredCapture(d),
+        stagingDir,
+      ),
+    discardRecoveredCapture: (stagingDir: string): Promise<void> =>
+      app.evaluate(
+        ({}, d: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.discardRecoveredCapture(d),
+        stagingDir,
+      ),
+    resumeInterruptedCapture: (stagingDir: string): Promise<{ jobId: string } | null> =>
+      app.evaluate(
+        ({}, d: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.resumeInterruptedCapture(d),
+        stagingDir,
+      ),
   };
 }

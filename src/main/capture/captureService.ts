@@ -213,9 +213,19 @@ export class CaptureService {
         }
 
         try {
-          const png = await captureFullPageScreenshot(webContents, settings.screenshotQuality);
-          await atomicWriteFile(stagedScreenshot, png);
+          const shot = await captureFullPageScreenshot(webContents, settings.screenshotQuality);
+          await atomicWriteFile(stagedScreenshot, shot.png);
           hasScreenshot = true;
+          if (shot.kind === 'viewport') {
+            // The archive still gets a screenshot, but not the full-page
+            // one it is supposed to hold. Say so instead of reporting a
+            // clean success.
+            warnings.push({
+              code: 'screenshot-viewport-only',
+              message: `Full-page screenshot failed; saved a viewport-sized screenshot instead (${shot.reason ?? 'unknown reason'})`,
+            });
+            logger.warn('capture.screenshot_viewport_only', { archiveId, domain, error: shot.reason });
+          }
         } catch (err) {
           warnings.push({ code: 'screenshot-failed', message: describeError(err) });
           logger.warn('capture.screenshot_failed', { archiveId, domain, error: describeError(err) });

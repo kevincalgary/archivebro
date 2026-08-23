@@ -61,6 +61,8 @@ export async function captureElementScreenshots(
   webContents: WebContents,
   pageUrl: string,
   candidates: FallbackCandidate[],
+  /** Stop early when the page's time budget is spent. */
+  outOfTime?: () => boolean,
 ): Promise<{ results: FallbackResult[]; skipped: Array<{ marker: string; reason: string }> }> {
   const results: FallbackResult[] = [];
   const skipped: Array<{ marker: string; reason: string }> = [];
@@ -80,6 +82,13 @@ export async function captureElementScreenshots(
 
   try {
     for (const candidate of candidates) {
+      // Each fallback scrolls, settles and rasterises one element. On a
+      // page with dozens of dead images that is the dominant cost, so it
+      // is the first thing to give up when the budget is gone.
+      if (outOfTime?.()) {
+        skipped.push({ marker: candidate.marker, reason: 'page-time-budget-exceeded' });
+        continue;
+      }
       try {
         const measurement = (await webContents.executeJavaScript(
           measureElementScript(candidate.marker),

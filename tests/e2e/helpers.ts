@@ -16,31 +16,63 @@ export interface AppHandle {
 }
 
 /**
- * Types a URL into the trusted address bar and submits it, confirming the
- * input actually holds the typed value (via Playwright's auto-retrying
- * `toHaveValue`) before pressing Enter. Guards against a real race: the
- * address bar's displayed value is synced from the active tab's live URL
- * whenever the input isn't focused, so filling it immediately after a tab
- * switch (e.g. right after clicking "new tab") can otherwise land on a
- * still-in-flight React state update.
+ * Types a URL into the trusted address bar and submits it.
+ *
+ * Guards against a real race. The address bar's displayed value is synced
+ * from the active tab's live URL whenever the input isn't focused
+ * ([Toolbar.tsx](../../src/renderer/components/Toolbar.tsx)), and React
+ * commits the focus flag that suppresses that sync asynchronously. So a
+ * `fill()` can be immediately readable as correct and then be overwritten
+ * a moment later, when an in-flight tab-state update lands while the
+ * component still believes the input is unfocused.
+ *
+ * The check therefore has to be "correct, and *still* correct a moment
+ * later", and it has to sit inside the retry loop: an earlier version
+ * broke out of the loop as soon as the value looked right and only then
+ * asserted, so a clobber arriving after the break had nothing left to
+ * re-fill the field and the assertion just polled the wrong value until
+ * it timed out.
  */
 export async function navigateViaAddressBar(handle: AppHandle, url: string): Promise<void> {
   const input = handle.window.locator('.address-bar-input');
+  await expect(input).toBeEnabled();
 
-  // The address bar re-syncs from the active tab's live URL whenever it
-  // isn't focused, so a fill() can land while React is mid-update and end
-  // up with a merged value. Re-fill until the field actually holds exactly
-  // what we typed before submitting.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  // Don't start typing into a field that is still being rewritten by a
+  // navigation that hasn't settled yet.
+  await waitForStableValue(handle, input);
+
+  let lastSeen = await input.inputValue();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     await input.click();
-    await input.fill('');
     await input.fill(url);
-    if ((await input.inputValue()) === url) break;
-    await handle.window.waitForTimeout(120);
+
+    await handle.window.waitForTimeout(100);
+    lastSeen = await input.inputValue();
+    if (lastSeen === url) {
+      await input.press('Enter');
+      return;
+    }
   }
 
-  await expect(input).toHaveValue(url);
-  await input.press('Enter');
+  throw new Error(
+    `Address bar kept reverting while typing ${url}: last held ${JSON.stringify(lastSeen)} after 8 attempts`,
+  );
+}
+
+/** Wait until the address bar stops changing on its own. */
+async function waitForStableValue(
+  handle: AppHandle,
+  input: ReturnType<Page['locator']>,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let previous = await input.inputValue();
+  while (Date.now() < deadline) {
+    await handle.window.waitForTimeout(100);
+    const current = await input.inputValue();
+    if (current === previous) return;
+    previous = current;
+  }
 }
 
 /**

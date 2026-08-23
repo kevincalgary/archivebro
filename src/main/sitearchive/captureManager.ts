@@ -2,6 +2,7 @@ import type { BrowserWindow, Session } from 'electron';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS } from '../../shared/sitearchiveTypes';
 import { CaptureCancelledError, CaptureJob } from './crawler';
+import { replayCheckpoint } from './captureJournal';
 import { logger } from '../util/logger';
 
 /**
@@ -49,6 +50,35 @@ export class CaptureManager {
     };
   }
 
+  /**
+   * Pick an interrupted capture back up where it stopped.
+   *
+   * The staging tree still holds every page captured before the
+   * interruption; the journal beside it restores the bookkeeping, so the
+   * crawl continues from the queue rather than starting over.
+   */
+  async resumeInterrupted(input: {
+    window: BrowserWindow;
+    session: Session;
+    stagingDir: string;
+  }): Promise<{ jobId: string; promise: Promise<CaptureResult | null> } | null> {
+    const checkpoint = await replayCheckpoint(input.stagingDir);
+    if (!checkpoint) return null;
+
+    return this.launch(
+      new CaptureJob(
+        input.window,
+        input.session,
+        checkpoint.meta.startUrl,
+        checkpoint.meta.scope,
+        checkpoint.meta.outputPath,
+        { stagingDir: input.stagingDir, checkpoint },
+      ),
+      checkpoint.meta.scope,
+      { resumed: true, pagesAlreadyCaptured: checkpoint.pagesCompleted },
+    );
+  }
+
   async start(input: {
     window: BrowserWindow;
     session: Session;
@@ -56,20 +86,35 @@ export class CaptureManager {
     scope: CaptureScope;
     outputPath: string;
   }): Promise<{ jobId: string; promise: Promise<CaptureResult | null> }> {
+    const scope = CaptureManager.clampScope(input.scope);
+    return this.launch(new CaptureJob(input.window, input.session, input.startUrl, scope, input.outputPath), scope, {
+      resumed: false,
+      pagesAlreadyCaptured: 0,
+    });
+  }
+
+  private launch(
+    job: CaptureJob,
+    scope: CaptureScope,
+    context: { resumed: boolean; pagesAlreadyCaptured: number },
+  ): { jobId: string; promise: Promise<CaptureResult | null> } {
     if (this.activeJob) {
       throw new Error('A capture is already running. Wait for it to finish or cancel it first.');
     }
 
-    const scope = CaptureManager.clampScope(input.scope);
-    const job = new CaptureJob(input.window, input.session, input.startUrl, scope, input.outputPath);
     this.activeJob = job;
 
     job.onProgress((progress) => {
       for (const l of this.listeners) l(progress);
     });
 
+    // scopeKind/maxPages/maxDepth are exactly the context a postmortem
+    // needs when a capture dies with nothing else logged for the whole
+    // run (a real 151-minute unlimited crawl did precisely that).
     logger.info('sitearchive.capture_started', {
       jobId: job.jobId,
+      resumed: context.resumed,
+      pagesAlreadyCaptured: context.pagesAlreadyCaptured,
       scopeKind: scope.kind,
       maxPages: scope.maxPages,
       maxDepth: scope.maxDepth,

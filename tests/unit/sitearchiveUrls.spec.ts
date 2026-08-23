@@ -6,6 +6,7 @@ import {
   isInScope,
   looksDestructive,
   looksLikeCrawlerTrap,
+  looksNonContent,
   isDocumentUrl,
   isMediaUrl,
   isExecutableUrl,
@@ -176,5 +177,59 @@ describe('content type helpers', () => {
     expect(extensionOf('https://e.com/a/b/file.TAR')).toBe('tar');
     expect(extensionOf('https://e.com/noext')).toBe('');
     expect(extensionOf('garbage')).toBe('');
+  });
+});
+
+describe('looksNonContent', () => {
+  const U = 'https://example.com';
+
+  it('skips sign-in, registration and account routes', () => {
+    for (const p of ['/login', '/log-in', '/signin', '/sign-in', '/register', '/signup', '/forum/login', '/en/account', '/lost-password']) {
+      expect(looksNonContent(`${U}${p}`), p).toBe(true);
+    }
+  });
+
+  it('skips search endpoints and per-user pages', () => {
+    for (const p of ['/search', '/forums/search', '/members', '/members/user-1', '/profile', '/forum/members/bob']) {
+      expect(looksNonContent(`${U}${p}`), p).toBe(true);
+    }
+  });
+
+  it('skips posting and subscription forms', () => {
+    for (const p of ['/new-thread', '/create-thread', '/post-thread', '/threads/5/reply', '/subscribe', '/checkout']) {
+      expect(looksNonContent(`${U}${p}`), p).toBe(true);
+    }
+  });
+
+  it('skips query-driven equivalents', () => {
+    for (const q of ['?do=login', '?action=search', '?mode=register', '?view=profile']) {
+      expect(looksNonContent(`${U}/index.php${q}`), q).toBe(true);
+    }
+  });
+
+  it('does not skip content whose path merely contains a keyword', () => {
+    // Over-matching here silently discards real pages, which is a worse
+    // failure than wasting a slot on a login form.
+    const contentPaths = [
+      '/research',
+      '/research/2024',
+      '/accounts-payable',
+      '/remember-when',
+      '/membership-benefits',
+      '/profiles-of-cars',
+      '/searching-for-answers',
+      '/articles/how-to-login-safely',
+      '/threads/dead-battery-how-to-open-hood.367500',
+      '/forums/range-rover-sport.232',
+      '/reply-all-considered-harmful',
+      '/',
+    ];
+    for (const p of contentPaths) {
+      expect(looksNonContent(`${U}${p}`), p).toBe(false);
+    }
+  });
+
+  it('does not crash on a malformed URL', () => {
+    expect(looksNonContent('not a url')).toBe(false);
   });
 });

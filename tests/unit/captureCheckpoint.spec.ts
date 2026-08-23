@@ -12,8 +12,10 @@ import {
 } from '../../src/main/sitearchive/captureJournal';
 import {
   SiteArchiveBuilder,
+  discardRecoveredCapture,
   finalizeRecoveredCapture,
   listRecoverableCaptures,
+  listRecoverableCapturesSummary,
   sweepSiteArchiveStaging,
 } from '../../src/main/sitearchive/archiveWriter';
 import { openSiteArchive } from '../../src/main/sitearchive/archiveReader';
@@ -281,6 +283,82 @@ describe('recovering an interrupted capture', () => {
 
     expect(recoverable.map((r) => r.meta.archiveId)).toEqual([second.archiveId, first.archiveId]);
     expect(recoverable[0]!.bytesOnDisk).toBeGreaterThan(0);
+  });
+});
+
+describe('recovery summary for the UI', () => {
+  it('reports pages captured, failures, and whether there is anything to finish', async () => {
+    const { stagingDir, archiveId } = await crawlThenDie(4);
+
+    const summaries = await listRecoverableCapturesSummary(tmp);
+    const mine = summaries.find((s) => s.archiveId === archiveId);
+    expect(mine).toBeDefined();
+    expect(mine!.pagesCompleted).toBe(4);
+    // 4 captured + 2 never-reached ('never-a', 'never-b') from crawlThenDie.
+    expect(mine!.pagesDiscovered).toBe(6);
+    expect(mine!.failureCount).toBe(0);
+    expect(mine!.canFinish).toBe(true);
+    expect(mine!.bytesOnDisk).toBeGreaterThan(0);
+
+    await discardRecoveredCapture(stagingDir);
+  });
+
+  it('says a capture with nothing captured yet cannot be finished', async () => {
+    // The process died before even the first page resolved -- see the
+    // "surfaces the page that was in flight" test above for the exact shape.
+    const archiveId = crypto.randomUUID();
+    const outputPath = path.join(tmp, 'out', 'nothing-yet.sitearchive');
+    const builder = new SiteArchiveBuilder(archiveId, '0.1.0');
+    await builder.init(tmp);
+    const stagingDir = builder.stagingPath!;
+    const journal = await CaptureJournal.create(stagingDir, metaFor(archiveId, outputPath));
+    const url = 'https://example.com/';
+    await journal.append({ t: 'enq', url, norm: url, depth: 0, on: null });
+    await journal.append({ t: 'deq', norm: url });
+    await journal.close();
+
+    const summaries = await listRecoverableCapturesSummary(tmp);
+    const mine = summaries.find((s) => s.archiveId === archiveId);
+    expect(mine).toBeDefined();
+    expect(mine!.pagesCompleted).toBe(0);
+    expect(mine!.canFinish).toBe(false);
+  });
+
+  it('skips a staging dir whose checkpoint is corrupt rather than surfacing a broken entry', async () => {
+    const { stagingDir, archiveId } = await crawlThenDie(2);
+    // Truncate the sidecar so readCheckpointMeta rejects it outright --
+    // listRecoverableCaptures already filters this at the meta stage, so
+    // this is really guarding that the summary layer inherits that filter
+    // rather than reimplementing (and potentially missing) it.
+    await fs.writeFile(path.join(stagingDir, CHECKPOINT_META_FILE), '{not json');
+
+    const summaries = await listRecoverableCapturesSummary(tmp);
+    expect(summaries.find((s) => s.archiveId === archiveId)).toBeUndefined();
+  });
+
+  it('does not offer to finish or discard a capture that is still running (resume is covered at the e2e level, which is where Electron is available)', async () => {
+    const archiveId = crypto.randomUUID();
+    const outputPath = path.join(tmp, 'out', 'still-live.sitearchive');
+    const builder = new SiteArchiveBuilder(archiveId, '0.1.0');
+    await builder.init(tmp);
+    const stagingDir = builder.stagingPath!;
+    const journal = await CaptureJournal.create(stagingDir, metaFor(archiveId, outputPath));
+    await journal.append({ t: 'enq', url: 'https://example.com/', norm: 'https://example.com/', depth: 0, on: null });
+    // Left open: the lock names this (alive) test process.
+
+    expect(await listRecoverableCapturesSummary(tmp)).toEqual([]);
+    expect(await finalizeRecoveredCapture(stagingDir, '0.1.0')).toBeNull();
+    expect(await discardRecoveredCapture(stagingDir)).toBe(false);
+    // Refusing to discard must mean nothing was actually deleted.
+    expect((await fs.stat(stagingDir)).isDirectory()).toBe(true);
+
+    await journal.close();
+    await discardRecoveredCapture(stagingDir);
+  });
+
+  it('treats discarding an already-gone staging dir as a harmless success', async () => {
+    const gone = path.join(tmp, 'sitearchive-staging-never-existed');
+    expect(await discardRecoveredCapture(gone)).toBe(true);
   });
 });
 

@@ -274,6 +274,29 @@ export interface CaptureResult {
   failures: CaptureFailureEntry[];
 }
 
+/**
+ * A staging tree from an interrupted capture, enriched with journal-replay
+ * data for display. Returned by `captureRecovery:list` -- the recovery UI's
+ * only source of this information; it never talks to the filesystem or the
+ * checkpoint journal directly.
+ */
+export interface RecoverableCaptureSummary {
+  archiveId: string;
+  startUrl: string;
+  outputPath: string;
+  scopeKind: CaptureScopeKind;
+  /** When the capture originally started (ISO timestamp). */
+  startedAt: string;
+  /** Most recent write anywhere in the staging tree -- when it actually stopped. */
+  lastActivityMs: number;
+  bytesOnDisk: number;
+  pagesCompleted: number;
+  pagesDiscovered: number;
+  failureCount: number;
+  /** False when finishing now would produce an archive with no pages to open. */
+  canFinish: boolean;
+}
+
 /** Summary returned when an archive is opened, for the UI header/details. */
 export interface OpenedSiteArchive {
   archiveId: string;

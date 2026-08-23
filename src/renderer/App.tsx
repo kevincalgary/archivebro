@@ -7,9 +7,10 @@ import LibraryScreen from './components/Library/LibraryScreen';
 import SettingsScreen from './components/Settings/SettingsScreen';
 import CaptureScopeDialog from './components/Capture/CaptureScopeDialog';
 import CaptureProgressDialog from './components/Capture/CaptureProgressDialog';
+import RecoveryDialog from './components/Capture/RecoveryDialog';
 import { BusyOverlay } from './components/Progress';
 import PermissionPrompt, { type PermissionRequest } from './components/PermissionPrompt';
-import type { CaptureProgress, CaptureScope } from '../shared/sitearchiveTypes';
+import type { CaptureProgress, CaptureScope, RecoverableCaptureSummary } from '../shared/sitearchiveTypes';
 
 export default function App() {
   const { tabs, activeTabId, screen, setTabs, upsertTab, removeTab, setActiveTabId, setScreen, setSettings } =
@@ -30,6 +31,14 @@ export default function App() {
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
   const permissionRequest = permissionQueue[0] ?? null;
 
+  // --- Recovering an interrupted .sitearchive capture ---
+  // Checked once at startup (see the mount effect below), not on a poll or
+  // on every focus -- so dismissing it can't just bring it right back, and
+  // a resolved capture can't be prompted for twice in the same session.
+  const [recoverable, setRecoverable] = useState<RecoverableCaptureSummary[] | null>(null);
+  const [recoveryBusyId, setRecoveryBusyId] = useState<string | null>(null);
+  const [recoveryErrors, setRecoveryErrors] = useState<Record<string, string>>({});
+
   const openArchivePath = useCallback(async (archivePath: string) => {
     setOpeningArchive(archivePath);
     try {
@@ -47,6 +56,9 @@ export default function App() {
   useEffect(() => {
     void window.archiveBrowser.tabs.list().then(setTabs);
     void window.archiveBrowser.settings.get().then(setSettings);
+    void window.archiveBrowser.captureRecovery.list().then((list) => {
+      if (list.length > 0) setRecoverable(list);
+    });
 
     const offTabState = window.archiveBrowser.events.onTabState((state) => {
       upsertTab(state);
@@ -139,7 +151,63 @@ export default function App() {
   // Anything that renders an HTML overlay must hide the native tab view,
   // or it will be painted over. Keep this list in sync with the overlays
   // rendered at the bottom of this component.
-  const modalOpen = Boolean(scopeDialog || captureProgress || openingArchive || permissionRequest);
+  const modalOpen = Boolean(scopeDialog || captureProgress || openingArchive || permissionRequest || recoverable);
+
+  const handleResumeRecovery = async (archiveId: string) => {
+    setRecoveryBusyId(archiveId);
+    try {
+      const res = await window.archiveBrowser.captureRecovery.resume(archiveId);
+      if (res.ok) {
+        // The live progress dialog takes over from here (see the
+        // onSiteCaptureProgress listener above); showing both at once
+        // would be confusing.
+        setRecoverable(null);
+      } else {
+        setRecoveryErrors((e) => ({
+          ...e,
+          [archiveId]: 'This capture could not be resumed. It may already be running elsewhere, or its checkpoint is unreadable.',
+        }));
+      }
+    } finally {
+      setRecoveryBusyId(null);
+    }
+  };
+
+  const handleFinishRecovery = async (archiveId: string) => {
+    setRecoveryBusyId(archiveId);
+    try {
+      const res = await window.archiveBrowser.captureRecovery.finish(archiveId);
+      if (res.ok) {
+        // The completed-capture progress dialog takes over from here.
+        setRecoverable(null);
+      } else {
+        setRecoveryErrors((e) => ({
+          ...e,
+          [archiveId]: 'This capture could not be finished. Its checkpoint may be corrupt or already gone.',
+        }));
+      }
+    } finally {
+      setRecoveryBusyId(null);
+    }
+  };
+
+  const handleDiscardRecovery = async (archiveId: string) => {
+    setRecoveryBusyId(archiveId);
+    try {
+      const res = await window.archiveBrowser.captureRecovery.discard(archiveId);
+      if (res.discarded) {
+        setRecoverable((list) => {
+          const next = (list ?? []).filter((c) => c.archiveId !== archiveId);
+          return next.length > 0 ? next : null;
+        });
+      }
+      // A refused discard (still running elsewhere) leaves the item in
+      // place with no error text -- it simply didn't disappear, which is
+      // enough signal without a confusing message on what is a rare race.
+    } finally {
+      setRecoveryBusyId(null);
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -275,6 +343,18 @@ export default function App() {
             const info = await window.archiveBrowser.siteCapture.estimate(activeTabId);
             setScopeDialog({ url: info.url, title: info.title, host: info.host });
           }}
+        />
+      )}
+
+      {recoverable && (
+        <RecoveryDialog
+          captures={recoverable}
+          busyId={recoveryBusyId}
+          errorById={recoveryErrors}
+          onResume={(id) => void handleResumeRecovery(id)}
+          onFinish={(id) => void handleFinishRecovery(id)}
+          onDiscard={(id) => void handleDiscardRecovery(id)}
+          onDismiss={() => setRecoverable(null)}
         />
       )}
     </div>

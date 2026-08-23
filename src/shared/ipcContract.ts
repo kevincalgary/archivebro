@@ -125,4 +125,15 @@ export const IpcSchemas = {
   [Channels.siteArchiveRevealInFolder]: z.object({ archivePath: nonEmptyString }),
   [Channels.siteArchiveOpenLive]: z.object({ url: nonEmptyString }),
   [Channels.siteArchiveConfirmExternal]: z.object({ url: nonEmptyString }),
+
+  // --- Interrupted-capture recovery ---
+  // archiveId is the only identifier accepted from the renderer; the main
+  // process re-derives the staging directory from it (SiteArchiveBuilder.
+  // stagingDirFor) rather than trusting any path the renderer supplies, so
+  // a compromised or buggy renderer can never point these at an arbitrary
+  // filesystem path.
+  [Channels.captureRecoveryList]: z.void(),
+  [Channels.captureRecoveryResume]: z.object({ archiveId }),
+  [Channels.captureRecoveryFinish]: z.object({ archiveId }),
+  [Channels.captureRecoveryDiscard]: z.object({ archiveId }),
 } as const satisfies Partial<Record<ChannelName, z.ZodType>>;

@@ -108,7 +108,7 @@ export function siteHooks(app: ElectronApplication) {
         ({}, d: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.finalizeRecoveredCapture(d),
         stagingDir,
       ),
-    discardRecoveredCapture: (stagingDir: string): Promise<void> =>
+    discardRecoveredCapture: (stagingDir: string): Promise<boolean> =>
       app.evaluate(
         ({}, d: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.discardRecoveredCapture(d),
         stagingDir,

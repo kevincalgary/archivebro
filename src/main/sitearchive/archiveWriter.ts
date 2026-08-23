@@ -8,6 +8,8 @@ import type {
   ArchivedResponseEntry,
   AssetKind,
   CaptureFailureEntry,
+  CaptureScopeKind,
+  RecoverableCaptureSummary,
   RouteMapEntry,
   ScreenshotFallbackMeta,
   SiteArchiveManifest,
@@ -109,6 +111,44 @@ export async function listRecoverableCaptures(tmpRoot: string): Promise<Recovera
 }
 
 /**
+ * `listRecoverableCaptures()`, enriched with journal-replay data for
+ * display -- pages/failures counted so far, and whether there is anything
+ * to finish. This is the only recovery listing the UI ever sees; it does
+ * not duplicate the detection or liveness logic above, just replays each
+ * candidate's journal for numbers to show.
+ */
+export async function listRecoverableCapturesSummary(tmpRoot: string): Promise<RecoverableCaptureSummary[]> {
+  const found = await listRecoverableCaptures(tmpRoot);
+  const summaries: RecoverableCaptureSummary[] = [];
+
+  for (const r of found) {
+    const checkpoint = await replayCheckpoint(r.stagingDir);
+    // Corrupt or unreadable since listRecoverableCaptures found it (raced
+    // with a delete, or a truncated sidecar): nothing safe to offer for it.
+    if (!checkpoint) continue;
+
+    summaries.push({
+      archiveId: r.meta.archiveId,
+      startUrl: r.meta.startUrl,
+      outputPath: r.meta.outputPath,
+      scopeKind: r.meta.scope.kind,
+      startedAt: r.meta.startedAt,
+      lastActivityMs: r.lastWriteMs,
+      bytesOnDisk: r.bytesOnDisk,
+      pagesCompleted: checkpoint.pagesCompleted,
+      pagesDiscovered: checkpoint.pagesDiscovered,
+      failureCount: checkpoint.failures.length,
+      // Finishing with zero pages would produce an archive that fails to
+      // open (openSiteArchive/openArchiveIntoTab reject an entry-less
+      // archive as 'empty-archive'), so it must not be offered as valid.
+      canFinish: checkpoint.pagesCompleted > 0,
+    });
+  }
+
+  return summaries;
+}
+
+/**
  * Turn an interrupted capture into a valid `.sitearchive` covering the
  * pages it did manage to capture, without crawling any further.
  *
@@ -120,7 +160,20 @@ export async function listRecoverableCaptures(tmpRoot: string): Promise<Recovera
 export async function finalizeRecoveredCapture(
   stagingDir: string,
   appVersion: string,
-): Promise<{ archivePath: string; pageCount: number; assetCount: number; fileSizeBytes: number } | null> {
+): Promise<{
+  archivePath: string;
+  pageCount: number;
+  assetCount: number;
+  fileSizeBytes: number;
+  failures: CaptureFailureEntry[];
+  siteTitle: string;
+  startUrl: string;
+  scopeKind: CaptureScopeKind;
+} | null> {
+  // Refuses to finalize a capture that is genuinely still being written to
+  // elsewhere -- same reasoning as the guard in CaptureManager.resumeInterrupted.
+  if (await isStagingDirLive(stagingDir)) return null;
+
   const checkpoint = await replayCheckpoint(stagingDir);
   if (!checkpoint) return null;
 
@@ -138,16 +191,18 @@ export async function finalizeRecoveredCapture(
     });
   }
 
+  const siteTitle = checkpoint.siteTitle || hostOf(checkpoint.meta.startUrl) || 'website';
   const { fileSizeBytes } = await builder.finalize({
     finalPath: checkpoint.meta.outputPath,
     startUrl: checkpoint.meta.startUrl,
     startFinalUrl: checkpoint.meta.startUrl,
-    siteTitle: checkpoint.siteTitle || hostOf(checkpoint.meta.startUrl) || 'website',
+    siteTitle,
     scope: checkpoint.meta.scope,
   });
 
   const pageCount = builder.pageCount;
   const assetCount = builder.assetCount;
+  const failures = builder.failureList;
   await builder.cleanup();
 
   logger.info('sitearchive.recovered_partial', {
@@ -156,12 +211,31 @@ export async function finalizeRecoveredCapture(
     neverCaptured: checkpoint.queue.length,
   });
 
-  return { archivePath: checkpoint.meta.outputPath, pageCount, assetCount, fileSizeBytes };
+  return {
+    archivePath: checkpoint.meta.outputPath,
+    pageCount,
+    assetCount,
+    fileSizeBytes,
+    failures,
+    siteTitle,
+    startUrl: checkpoint.meta.startUrl,
+    scopeKind: checkpoint.meta.scope.kind,
+  };
 }
 
-/** Discard an interrupted capture and everything it staged. */
-export async function discardRecoveredCapture(stagingDir: string): Promise<void> {
+/**
+ * Discard an interrupted capture and everything it staged.
+ *
+ * Returns false, without deleting anything, if the staging dir's capture
+ * is still genuinely running elsewhere -- deleting out from under a live
+ * journal would corrupt an in-progress capture, not just an idle one.
+ * Returns true for a staging dir that is already gone, since "discard
+ * something that doesn't exist" is a no-op success, not a failure.
+ */
+export async function discardRecoveredCapture(stagingDir: string): Promise<boolean> {
+  if (await isStagingDirLive(stagingDir)) return false;
   await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+  return true;
 }
 
 /**

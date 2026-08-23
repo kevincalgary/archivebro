@@ -2,7 +2,7 @@ import type { BrowserWindow, Session } from 'electron';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS } from '../../shared/sitearchiveTypes';
 import { CaptureCancelledError, CaptureJob } from './crawler';
-import { replayCheckpoint } from './captureJournal';
+import { isStagingDirLive, replayCheckpoint } from './captureJournal';
 import { logger } from '../util/logger';
 
 /**
@@ -64,6 +64,10 @@ export class CaptureManager {
   }): Promise<{ jobId: string; promise: Promise<CaptureResult | null> } | null> {
     const checkpoint = await replayCheckpoint(input.stagingDir);
     if (!checkpoint) return null;
+    // Refuses a capture that is genuinely still being written to --
+    // possibly by another app instance sharing this OS temp directory --
+    // rather than racing a second set of journal appends against it.
+    if (await isStagingDirLive(input.stagingDir)) return null;
 
     return this.launch(
       new CaptureJob(

@@ -63,7 +63,7 @@ export interface TestHooks {
   /** Continue an interrupted capture from its checkpoint. */
   resumeInterruptedCapture: (stagingDir: string) => Promise<{ jobId: string } | null>;
   /** Throw away an interrupted capture and everything it staged. */
-  discardRecoveredCapture: (stagingDir: string) => Promise<void>;
+  discardRecoveredCapture: (stagingDir: string) => Promise<boolean>;
 }
 
 declare global {

@@ -72,6 +72,14 @@ export const Channels = {
   siteArchiveOpenLive: 'siteArchive:openLive',
   siteArchiveConfirmExternal: 'siteArchive:confirmExternal',
 
+  // Recovering an interrupted .sitearchive capture (distinct from
+  // siteCapture:pause/resume, which toggle a *running* job's pause state --
+  // these act on a capture that already stopped, identified by archiveId).
+  captureRecoveryList: 'captureRecovery:list',
+  captureRecoveryResume: 'captureRecovery:resume',
+  captureRecoveryFinish: 'captureRecovery:finish',
+  captureRecoveryDiscard: 'captureRecovery:discard',
+
   // Events pushed main -> renderer for capture/archives
   onSiteCaptureProgress: 'events:siteCaptureProgress',
   onSiteArchiveOpenRequest: 'events:siteArchiveOpenRequest',

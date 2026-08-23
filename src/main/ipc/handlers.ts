@@ -1,4 +1,4 @@
-import { ipcMain, dialog, shell, session, type IpcMainInvokeEvent, type BrowserWindow } from 'electron';
+import { app, ipcMain, dialog, shell, session, type IpcMainInvokeEvent, type BrowserWindow } from 'electron';
 import { z } from 'zod';
 import { promises as fs, existsSync } from 'node:fs';
 import { Channels, IpcSchemas } from '../../shared/ipcContract';
@@ -18,7 +18,13 @@ import { openSiteArchive, SiteArchiveError } from '../sitearchive/archiveReader'
 import { registerOpenedArchive, getSiteArchiveSession } from '../sitearchive/sitearchiveSession';
 import { suggestArchiveFilename } from '../sitearchive/crawler';
 import { isExecutableUrl } from '../sitearchive/urlNormalize';
-import { SITEARCHIVE_EXTENSION, type OpenedSiteArchive } from '../../shared/sitearchiveTypes';
+import { SITEARCHIVE_EXTENSION, type CaptureProgress, type OpenedSiteArchive } from '../../shared/sitearchiveTypes';
+import {
+  SiteArchiveBuilder,
+  discardRecoveredCapture,
+  finalizeRecoveredCapture,
+  listRecoverableCapturesSummary,
+} from '../sitearchive/archiveWriter';
 import path from 'node:path';
 
 interface Deps {
@@ -294,6 +300,71 @@ export function registerIpcHandlers(deps: Deps): void {
   handle(Channels.siteCapturePause, (args) => ({ ok: captureManager.pause(args.jobId) }));
   handle(Channels.siteCaptureResume, (args) => ({ ok: captureManager.resume(args.jobId) }));
   handle(Channels.siteCaptureCancel, (args) => ({ ok: captureManager.cancel(args.jobId) }));
+
+  // --- Recovering an interrupted .sitearchive capture ---
+  // Every handler below re-derives the staging directory from the given
+  // archiveId via SiteArchiveBuilder.stagingDirFor rather than accepting a
+  // path from the renderer, so a compromised or buggy renderer can never
+  // point a resume/finish/discard at an arbitrary filesystem location.
+
+  handle(Channels.captureRecoveryList, () => listRecoverableCapturesSummary(app.getPath('temp')));
+
+  handle(Channels.captureRecoveryResume, async (args) => {
+    if (captureManager.isBusy) return { ok: false };
+    const stagingDir = SiteArchiveBuilder.stagingDirFor(app.getPath('temp'), args.archiveId);
+    const started = await captureManager.resumeInterrupted({
+      window: mainWindow,
+      session: session.fromPartition('persist:browsing'),
+      stagingDir,
+    });
+    if (!started) return { ok: false };
+    // Progress (including completion) reaches the renderer through the
+    // same capture progress event a fresh capture uses, so nothing further
+    // is awaited here -- see siteCaptureStart above.
+    void started.promise.catch(() => {});
+    return { ok: true, jobId: started.jobId };
+  });
+
+  handle(Channels.captureRecoveryFinish, async (args) => {
+    const stagingDir = SiteArchiveBuilder.stagingDirFor(app.getPath('temp'), args.archiveId);
+    const finished = await finalizeRecoveredCapture(stagingDir, app.getVersion());
+    if (!finished) return { ok: false };
+
+    // Finishing doesn't run through CaptureJob/CaptureManager -- there's no
+    // crawling left to do -- so its result is synthesized as a terminal
+    // CaptureProgress and sent through the exact channel a live capture's
+    // completion uses. This lets the renderer's existing progress dialog
+    // show it (Open Archive / Reveal / Close) without any bespoke "finish
+    // result" UI of its own.
+    const progress: CaptureProgress = {
+      jobId: `recovered-${args.archiveId}`,
+      state: 'completed',
+      siteTitle: finished.siteTitle,
+      startUrl: finished.startUrl,
+      scopeKind: finished.scopeKind,
+      pagesDiscovered: finished.pageCount,
+      pagesCompleted: finished.pageCount,
+      currentUrl: null,
+      bytesDownloaded: finished.fileSizeBytes,
+      warningCount: 0,
+      failureCount: finished.failures.length,
+      result: {
+        archivePath: finished.archivePath,
+        pageCount: finished.pageCount,
+        assetCount: finished.assetCount,
+        fileSizeBytes: finished.fileSizeBytes,
+        failures: finished.failures,
+      },
+    };
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onSiteCaptureProgress, progress);
+    return { ok: true };
+  });
+
+  handle(Channels.captureRecoveryDiscard, async (args) => {
+    const stagingDir = SiteArchiveBuilder.stagingDirFor(app.getPath('temp'), args.archiveId);
+    const discarded = await discardRecoveredCapture(stagingDir);
+    return { discarded };
+  });
 
   // --- Opening .sitearchive files ---
 

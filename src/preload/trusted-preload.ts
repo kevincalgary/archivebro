@@ -11,7 +11,12 @@ import type {
   PermissionKind,
   TabState,
 } from '../shared/types';
-import type { CaptureProgress, CaptureScope, OpenedSiteArchive } from '../shared/sitearchiveTypes';
+import type {
+  CaptureProgress,
+  CaptureScope,
+  OpenedSiteArchive,
+  RecoverableCaptureSummary,
+} from '../shared/sitearchiveTypes';
 
 // This is the ONLY preload script in the app that calls contextBridge /
 // ipcRenderer. It is attached exclusively to the trusted chrome window's
@@ -86,6 +91,15 @@ const api = {
     pause: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCapturePause, { jobId }),
     resume: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCaptureResume, { jobId }),
     cancel: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCaptureCancel, { jobId }),
+  },
+  captureRecovery: {
+    list: (): Promise<RecoverableCaptureSummary[]> => ipcRenderer.invoke(Channels.captureRecoveryList),
+    resume: (archiveId: string): Promise<{ ok: boolean; jobId?: string }> =>
+      ipcRenderer.invoke(Channels.captureRecoveryResume, { archiveId }),
+    finish: (archiveId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(Channels.captureRecoveryFinish, { archiveId }),
+    discard: (archiveId: string): Promise<{ discarded: boolean }> =>
+      ipcRenderer.invoke(Channels.captureRecoveryDiscard, { archiveId }),
   },
   siteArchive: {
     open: (): Promise<OpenedSiteArchive | null> => ipcRenderer.invoke(Channels.siteArchiveOpen),

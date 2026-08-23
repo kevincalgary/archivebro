@@ -750,6 +750,56 @@ body,
   margin-top: 10px;
 }
 
+/* --- Interrupted-capture recovery dialog --- */
+.recovery-intro {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0 0 16px;
+}
+
+.recovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.recovery-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.recovery-item .capture-target {
+  margin-bottom: 8px;
+}
+
+.recovery-item-stats {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.recovery-item-output {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.recovery-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.recovery-confirm-label {
+  font-size: 12px;
+  color: var(--warn);
+}
+
 .capture-note {
   font-size: 11px;
   color: var(--text-dim);

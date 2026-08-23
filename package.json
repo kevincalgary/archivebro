@@ -19,7 +19,7 @@
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "vitest run tests/unit",
+    "test:unit": "cross-env ELECTRON_RUN_AS_NODE=1 electron node_modules/.bin/vitest run tests/unit",
     "test:e2e": "npm run build && playwright test",
     "fixtures:serve": "node fixtures/server.js",
     "fixtures:serve:site": "node fixtures/siteServer.js",
@@ -27,7 +27,7 @@
     "package:win": "npm run build && electron-builder --win --dir",
     "package:mac:dist": "npm run build && electron-builder --mac",
     "package:win:dist": "npm run build && electron-builder --win",
-    "postinstall": "electron-rebuild -f -w better-sqlite3"
+    "postinstall": "node node_modules/electron/install.js && electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
     "archiver": "^8.0.0",

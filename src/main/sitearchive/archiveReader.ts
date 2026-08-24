@@ -1,10 +1,13 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import yauzl from 'yauzl';
-import type { SiteArchiveManifest, RouteMapEntry } from '../../shared/sitearchiveTypes';
+import Database from 'better-sqlite3';
+import type { SiteArchiveManifest, RouteMapEntry, SiteArchiveSearchResult } from '../../shared/sitearchiveTypes';
 import { SITEARCHIVE_FORMAT_VERSION } from '../../shared/sitearchiveTypes';
 import { logger } from '../util/logger';
+import { sanitizeFtsQuery } from '../util/ftsQuery';
 
 /**
  * Reading a .sitearchive means reading an untrusted file that may have
@@ -134,6 +137,16 @@ export class OpenedArchive {
   private cache = new Map<string, Buffer>();
   private cacheBytes = 0;
   private static readonly MAX_CACHE_BYTES = 64 * 1024 * 1024;
+  /**
+   * The archive's index.sqlite catalog, extracted to a real file so
+   * better-sqlite3 can open it (it has no API for opening a database
+   * straight out of an in-memory buffer). Search is a nice-to-have on top
+   * of browsing, so a missing or corrupt catalog just means `search()`
+   * returns no results rather than the archive failing to open -- see
+   * openSiteArchive()'s best-effort initSearchIndex() call.
+   */
+  private indexDb: Database.Database | null = null;
+  private indexDbTempPath: string | null = null;
 
   constructor(
     readonly archivePath: string,
@@ -170,6 +183,48 @@ export class OpenedArchive {
 
   getResponse(sha: string) {
     return this.responseByHash.get(sha) ?? null;
+  }
+
+  /**
+   * Extract index.sqlite to a temp file and open it, so `search()` has
+   * something to query. Named deterministically per archive id (not a
+   * random name) so re-opening the same archive overwrites rather than
+   * accumulating a new temp file on every open.
+   */
+  async initSearchIndex(buffer: Buffer): Promise<void> {
+    const tempPath = path.join(os.tmpdir(), `archive-browser-search-index-${this.manifest.archiveId}.sqlite`);
+    await fs.writeFile(tempPath, buffer);
+    this.indexDbTempPath = tempPath;
+    this.indexDb = new Database(tempPath, { readonly: true });
+  }
+
+  /** Full-text search over every captured page's title + extracted text. */
+  search(query: string, limit = 30): SiteArchiveSearchResult[] {
+    if (!this.indexDb) return [];
+    const q = sanitizeFtsQuery(query.trim());
+    if (!q) return [];
+
+    try {
+      const rows = this.indexDb
+        .prepare(
+          `SELECT page_id, snippet(pages_fts, 2, '', '', '…', 12) AS snippet
+           FROM pages_fts WHERE pages_fts MATCH ? ORDER BY rank LIMIT ?`,
+        )
+        .all(q, limit) as Array<{ page_id: string; snippet: string }>;
+
+      const results: SiteArchiveSearchResult[] = [];
+      for (const row of rows) {
+        const page = this.pageById.get(row.page_id);
+        if (!page) continue; // stale row from a mismatched catalog -- skip rather than throw
+        results.push({ pageId: row.page_id, title: page.title, normalizedUrl: page.normalizedUrl, snippet: row.snippet });
+      }
+      return results;
+    } catch (err) {
+      // A malformed query or corrupt index shouldn't break browsing --
+      // search just comes back empty.
+      logger.warn('sitearchive.search_failed', { error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
   }
 
   /**
@@ -211,6 +266,19 @@ export class OpenedArchive {
       this.zipfile.close();
     } catch {
       // already closed
+    }
+    if (this.indexDb) {
+      try {
+        this.indexDb.close();
+      } catch {
+        // already closed
+      }
+      this.indexDb = null;
+    }
+    if (this.indexDbTempPath) {
+      const tempPath = this.indexDbTempPath;
+      this.indexDbTempPath = null;
+      void fs.rm(tempPath, { force: true }).catch(() => {});
     }
   }
 }
@@ -343,7 +411,24 @@ export async function openSiteArchive(archivePath: string): Promise<OpenedArchiv
     formatVersion: manifest.formatVersion,
   });
 
-  return new OpenedArchive(archivePath, manifest, zipfile, entries);
+  const archive = new OpenedArchive(archivePath, manifest, zipfile, entries);
+
+  // Best-effort: search is a convenience on top of browsing, not required
+  // to open the archive at all. An archive from before this feature has no
+  // indexPath; one with a corrupt or checksum-mismatched catalog just
+  // means search() returns no results rather than the whole open failing.
+  if (manifest.indexPath && manifest.indexSha256) {
+    try {
+      const indexBuffer = await archive.readEntry(manifest.indexPath, manifest.indexSha256);
+      await archive.initSearchIndex(indexBuffer);
+    } catch (err) {
+      logger.warn('sitearchive.search_index_unavailable', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return archive;
 }
 
 function validateManifestShape(m: unknown): string | null {

@@ -179,6 +179,28 @@ export class TabManager {
     return id;
   }
 
+  /** The archive a site-archive tab is viewing, or null for any other kind of tab. */
+  getSiteArchiveIdForTab(tabId: string): string | null {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.kind !== 'sitearchive') return null;
+    return tab.offlineArchiveId;
+  }
+
+  /**
+   * Jump an already-open site-archive tab to a specific page, e.g. from a
+   * search result. Refuses if the tab isn't actually a site-archive tab
+   * for exactly this archive -- defense in depth against a renderer-
+   * supplied pageId being pointed at the wrong tab, even though pageId
+   * itself is just a UUID looked up server-side by whoever calls this.
+   */
+  navigateSiteArchiveTab(tabId: string, archiveId: string, pageId: string): boolean {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.kind !== 'sitearchive' || tab.offlineArchiveId !== archiveId) return false;
+    if (tab.view.webContents.isDestroyed()) return false;
+    void tab.view.webContents.loadURL(`${ARCHIVE_SITE_SCHEME}://${archiveId}/page/${pageId}`);
+    return true;
+  }
+
   onSiteArchiveOpenLive(listener: (url: string) => void): void {
     this.openLiveListeners.push(listener);
   }

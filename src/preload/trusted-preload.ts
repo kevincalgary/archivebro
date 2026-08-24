@@ -17,6 +17,7 @@ import type {
   CaptureScope,
   OpenedSiteArchive,
   RecoverableCaptureSummary,
+  SiteArchiveSearchResult,
 } from '../shared/sitearchiveTypes';
 
 // This is the ONLY preload script in the app that calls contextBridge /
@@ -112,6 +113,10 @@ const api = {
       ipcRenderer.invoke(Channels.siteArchiveOpenLive, { url }),
     confirmExternal: (url: string): Promise<{ opened: boolean; reason?: string }> =>
       ipcRenderer.invoke(Channels.siteArchiveConfirmExternal, { url }),
+    search: (tabId: string, query: string): Promise<SiteArchiveSearchResult[]> =>
+      ipcRenderer.invoke(Channels.siteArchiveSearch, { tabId, query }),
+    navigateToPage: (tabId: string, pageId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(Channels.siteArchiveNavigateToPage, { tabId, pageId }),
   },
   updates: {
     checkNow: (): Promise<UpdateStatus> => ipcRenderer.invoke(Channels.updatesCheckNow),

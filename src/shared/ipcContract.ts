@@ -125,6 +125,8 @@ export const IpcSchemas = {
   [Channels.siteArchiveRevealInFolder]: z.object({ archivePath: nonEmptyString }),
   [Channels.siteArchiveOpenLive]: z.object({ url: nonEmptyString }),
   [Channels.siteArchiveConfirmExternal]: z.object({ url: nonEmptyString }),
+  [Channels.siteArchiveSearch]: z.object({ tabId, query: z.string().max(500) }),
+  [Channels.siteArchiveNavigateToPage]: z.object({ tabId, pageId: nonEmptyString }),
 
   // --- Interrupted-capture recovery ---
   // archiveId is the only identifier accepted from the renderer; the main

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ArchiveDetail, ArchiveRecord, CaptureWarning, LibraryPage, LibraryQuery } from '../../shared/types';
+import { sanitizeFtsQuery } from '../util/ftsQuery';
 
 interface ArchiveRow {
   id: string;
@@ -173,7 +174,7 @@ export class ArchiveRepo {
     if (q.search && q.search.trim().length > 0) {
       fromClause = 'FROM archives_fts f JOIN archives a ON a.id = f.archive_id';
       clauses.push('archives_fts MATCH @search');
-      params.search = ftsQuery(q.search.trim());
+      params.search = sanitizeFtsQuery(q.search.trim());
     }
     if (q.domain) {
       clauses.push('a.domain = @domain');
@@ -278,11 +279,4 @@ export class ArchiveRepo {
     const rows = this.db.prepare('SELECT archive_id FROM interrupted_captures').all() as { archive_id: string }[];
     return rows.map((r) => r.archive_id);
   }
-}
-
-function ftsQuery(raw: string): string {
-  // Quote each token individually so punctuation in the user's search
-  // string can't be interpreted as FTS5 query syntax.
-  const tokens = raw.split(/\s+/).filter(Boolean);
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"*`).join(' ');
 }

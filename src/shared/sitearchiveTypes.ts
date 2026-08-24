@@ -310,3 +310,12 @@ export interface OpenedSiteArchive {
   formatVersion: number;
   appVersion: string;
 }
+
+/** One match from searching inside an open .sitearchive (see OpenedArchive.search()). */
+export interface SiteArchiveSearchResult {
+  pageId: string;
+  title: string;
+  normalizedUrl: string;
+  /** Plain text excerpt around the match, truncated -- no markup, safe to render as-is. */
+  snippet: string;
+}

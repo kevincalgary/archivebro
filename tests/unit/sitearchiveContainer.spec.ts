@@ -190,6 +190,56 @@ describe('SiteArchiveBuilder -> openSiteArchive round trip', () => {
   });
 });
 
+describe('Full-text search inside an opened archive', () => {
+  it('matches the page whose extracted text contains the term, not other pages', async () => {
+    const out = path.join(tmp, 'Searchable.sitearchive');
+    // buildSampleArchive's p1 ("Home") has text 'Home', p2 ("About") has
+    // text 'About' -- distinct enough to prove search finds the right page,
+    // not just any page.
+    await buildSampleArchive(out);
+    const archive = await openSiteArchive(out);
+    try {
+      const homeResults = archive.search('Home');
+      expect(homeResults.map((r) => r.pageId)).toEqual(['p1']);
+
+      const aboutResults = archive.search('About');
+      expect(aboutResults.map((r) => r.pageId)).toEqual(['p2']);
+
+      expect(archive.search('no-such-term-anywhere')).toHaveLength(0);
+    } finally {
+      archive.close();
+    }
+  });
+
+  it('is inert (not an error) on punctuation that would otherwise be invalid FTS5 syntax', async () => {
+    const out = path.join(tmp, 'SearchableSyntax.sitearchive');
+    await buildSampleArchive(out);
+    const archive = await openSiteArchive(out);
+    try {
+      // A bare quote, dash, or asterisk are all meaningful in raw FTS5
+      // query syntax -- sanitizeFtsQuery must neutralize them rather than
+      // this throwing back up through search().
+      expect(() => archive.search('"unterminated')).not.toThrow();
+      expect(() => archive.search('- leading dash')).not.toThrow();
+      expect(() => archive.search('*')).not.toThrow();
+    } finally {
+      archive.close();
+    }
+  });
+
+  it('an empty or whitespace-only query returns no results rather than matching everything', async () => {
+    const out = path.join(tmp, 'SearchableEmpty.sitearchive');
+    await buildSampleArchive(out);
+    const archive = await openSiteArchive(out);
+    try {
+      expect(archive.search('')).toHaveLength(0);
+      expect(archive.search('   ')).toHaveLength(0);
+    } finally {
+      archive.close();
+    }
+  });
+});
+
 describe('SiteArchiveBuilder concurrent writes (parallel crawling)', () => {
   // Pages are now captured in parallel (see crawler.ts), so two workers can
   // genuinely call addAsset/addResponse for identical bytes before either

@@ -710,6 +710,23 @@ export class SiteArchiveBuilder {
     const staging = this.requireStaging();
     const dbPath = path.join(staging, 'index.sqlite');
     await fs.rm(dbPath, { force: true });
+
+    // Read every page's extracted text back off disk now, rather than
+    // holding it in memory for the whole crawl -- addPage() never keeps it
+    // around after writing pages/<id>.txt (see there), and this is the one
+    // place that needs it again, once, at the very end. A missing/unreadable
+    // text file just means that page's FTS row has an empty body -- still
+    // searchable by title, and not fatal to the rest of the catalog.
+    const bodies = new Map<string, string>();
+    for (const p of this.pages) {
+      if (!p.textPath) continue;
+      try {
+        bodies.set(p.pageId, await fs.readFile(path.join(staging, p.textPath), 'utf8'));
+      } catch {
+        // handled by the ?? '' fallback below
+      }
+    }
+
     const db = new Database(dbPath);
     try {
       db.exec(`
@@ -743,6 +760,10 @@ export class SiteArchiveBuilder {
           target_type TEXT NOT NULL,
           target_id TEXT NOT NULL
         );
+        -- Full-text search over every page's title + extracted text, so
+        -- "search inside this archive" doesn't mean decompressing and
+        -- scanning every pages/<id>.txt file at query time.
+        CREATE VIRTUAL TABLE pages_fts USING fts5(page_id UNINDEXED, title, body);
       `);
 
       const insertPage = db.prepare(
@@ -753,10 +774,12 @@ export class SiteArchiveBuilder {
       );
       const insertAssetUrl = db.prepare('INSERT INTO asset_urls (url, sha256) VALUES (?,?)');
       const insertRoute = db.prepare('INSERT OR REPLACE INTO routes (normalized_url, target_type, target_id) VALUES (?,?,?)');
+      const insertPageFts = db.prepare('INSERT INTO pages_fts (page_id, title, body) VALUES (?,?,?)');
 
       db.transaction(() => {
         for (const p of this.pages) {
           insertPage.run(p.pageId, p.originalUrl, p.finalUrl, p.normalizedUrl, p.title, p.depth, p.htmlPath, p.screenshotPath, p.textPath);
+          insertPageFts.run(p.pageId, p.title, bodies.get(p.pageId) ?? '');
         }
         for (const a of this.assets.values()) {
           insertAsset.run(a.sha256, a.path, a.contentType, a.byteSize, a.kind, a.screenshotFallback ? 1 : 0);

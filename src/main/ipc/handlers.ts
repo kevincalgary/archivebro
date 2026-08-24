@@ -16,7 +16,7 @@ import { moveArchiveStorage } from '../util/moveStorage';
 import type { DiskUsageInfo } from '../../shared/types';
 import type { CaptureManager } from '../sitearchive/captureManager';
 import { openSiteArchive, SiteArchiveError } from '../sitearchive/archiveReader';
-import { registerOpenedArchive, getSiteArchiveSession } from '../sitearchive/sitearchiveSession';
+import { registerOpenedArchive, getSiteArchiveSession, getOpenedArchive } from '../sitearchive/sitearchiveSession';
 import { suggestArchiveFilename } from '../sitearchive/crawler';
 import { isExecutableUrl } from '../sitearchive/urlNormalize';
 import { SITEARCHIVE_EXTENSION, type CaptureProgress, type OpenedSiteArchive } from '../../shared/sitearchiveTypes';
@@ -456,6 +456,26 @@ export function registerIpcHandlers(deps: Deps): void {
       return { opened: true };
     }
     return { opened: false, reason: 'unsupported-scheme' };
+  });
+
+  /**
+   * Full-text search inside an open .sitearchive. archiveId is derived
+   * server-side from the tab, never taken directly from the renderer, so a
+   * search can only ever query the archive that tab is actually showing.
+   */
+  handle(Channels.siteArchiveSearch, (args) => {
+    const archiveId = tabManager.getSiteArchiveIdForTab(args.tabId);
+    if (!archiveId) return [];
+    const archive = getOpenedArchive(archiveId);
+    if (!archive) return [];
+    return archive.search(args.query);
+  });
+
+  /** Jump a site-archive tab to one of its own pages, e.g. a search result. */
+  handle(Channels.siteArchiveNavigateToPage, (args) => {
+    const archiveId = tabManager.getSiteArchiveIdForTab(args.tabId);
+    if (!archiveId) return { ok: false };
+    return { ok: tabManager.navigateSiteArchiveTab(args.tabId, archiveId, args.pageId) };
   });
 
   async function openArchiveIntoTab(archivePath: string): Promise<OpenedSiteArchive> {

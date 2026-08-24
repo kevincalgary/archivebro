@@ -71,6 +71,8 @@ export const Channels = {
   siteArchiveRevealInFolder: 'siteArchive:revealInFolder',
   siteArchiveOpenLive: 'siteArchive:openLive',
   siteArchiveConfirmExternal: 'siteArchive:confirmExternal',
+  siteArchiveSearch: 'siteArchive:search',
+  siteArchiveNavigateToPage: 'siteArchive:navigateToPage',
 
   // Recovering an interrupted .sitearchive capture (distinct from
   // siteCapture:pause/resume, which toggle a *running* job's pause state --

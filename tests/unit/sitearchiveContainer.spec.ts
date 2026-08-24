@@ -190,6 +190,89 @@ describe('SiteArchiveBuilder -> openSiteArchive round trip', () => {
   });
 });
 
+describe('SiteArchiveBuilder concurrent writes (parallel crawling)', () => {
+  // Pages are now captured in parallel (see crawler.ts), so two workers can
+  // genuinely call addAsset/addResponse for identical bytes before either
+  // has finished writing -- addAsset/addResponse must not race in that case
+  // (see the in-flight-write guard in archiveWriter.ts). Calling both
+  // WITHOUT awaiting the first (Promise.all) is what actually exercises the
+  // race a sequential await never would.
+  it('addAsset: two concurrent callers for identical bytes write the file once and keep both sourceUrls', async () => {
+    const builder = new SiteArchiveBuilder(crypto.randomUUID(), '0.1.0');
+    await builder.init(tmp);
+
+    const bytes = Buffer.from('shared-logo-bytes');
+    const [a, b] = await Promise.all([
+      builder.addAsset(bytes, 'image/png', 'https://example.com/page-a/logo.png'),
+      builder.addAsset(bytes, 'image/png', 'https://example.com/page-b/logo.png'),
+    ]);
+
+    expect(a.sha256).toBe(b.sha256);
+    // Both calls must return the SAME entry object -- not two separate
+    // entries for the same hash -- since that's what proves only one write
+    // happened and the second call joined it rather than racing it.
+    expect(a).toBe(b);
+    expect(a.sourceUrls.sort()).toEqual(['https://example.com/page-a/logo.png', 'https://example.com/page-b/logo.png']);
+
+    const out = path.join(tmp, 'Concurrent.sitearchive');
+    await builder.addPage({
+      pageId: 'p1',
+      originalUrl: 'https://example.com/',
+      finalUrl: 'https://example.com/',
+      normalizedUrl: 'https://example.com/',
+      title: 'Home',
+      depth: 0,
+      html: '<html></html>',
+      screenshot: null,
+      text: null,
+      redirectedFrom: [],
+    });
+    const { manifest } = await builder.finalize({
+      finalPath: out,
+      startUrl: 'https://example.com/',
+      startFinalUrl: 'https://example.com/',
+      siteTitle: 'Example',
+      scope: DEFAULT_SITE_SCOPE,
+    });
+    // Exactly one asset entry on disk, not two competing writes of the same bytes.
+    expect(manifest.assets).toHaveLength(1);
+
+    const archive = await openSiteArchive(out);
+    try {
+      const stored = await archive.readEntry(manifest.assets[0]!.path, manifest.assets[0]!.sha256);
+      expect(stored.equals(bytes)).toBe(true);
+    } finally {
+      archive.close();
+    }
+  });
+
+  it('addResponse: two concurrent callers for identical bytes write the file once', async () => {
+    const builder = new SiteArchiveBuilder(crypto.randomUUID(), '0.1.0');
+    await builder.init(tmp);
+
+    const bytes = Buffer.from('{"shared":"response"}');
+    const [a, b] = await Promise.all([
+      builder.addResponse(bytes, 'https://example.com/api/a', 'https://example.com/api/a', 'application/json', 200),
+      builder.addResponse(bytes, 'https://example.com/api/b', 'https://example.com/api/b', 'application/json', 200),
+    ]);
+
+    expect(a).toBe(b);
+    expect(a.sha256).toBe(b.sha256);
+  });
+
+  it('a hash already fully stored before a later call arrives is served from the cache, not written again', async () => {
+    const builder = new SiteArchiveBuilder(crypto.randomUUID(), '0.1.0');
+    await builder.init(tmp);
+
+    const bytes = Buffer.from('sequential-bytes');
+    const first = await builder.addAsset(bytes, 'image/png', 'https://example.com/one.png');
+    const second = await builder.addAsset(bytes, 'image/png', 'https://example.com/two.png');
+
+    expect(second).toBe(first);
+    expect(first.sourceUrls).toEqual(['https://example.com/one.png', 'https://example.com/two.png']);
+  });
+});
+
 describe('openSiteArchive rejects malformed and malicious archives', () => {
   it('rejects a file that is not a zip at all', async () => {
     const bogus = path.join(tmp, 'bogus.sitearchive');

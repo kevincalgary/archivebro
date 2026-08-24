@@ -400,6 +400,22 @@ export class SiteArchiveBuilder {
   private stagingDir: string | null = null;
   private totalUncompressed = 0;
   private journal: CaptureJournal | null = null;
+  /**
+   * Content hash -> in-progress write, for addAsset/addResponse.
+   *
+   * Now that pages are captured in parallel (see crawler.ts), two workers
+   * can genuinely race to store the identical bytes at the same time (a
+   * shared logo referenced from two different pages fetched concurrently)
+   * -- without this, both would see `this.assets.get(hash)` miss, both
+   * `await fs.writeFile()` the same path concurrently (a real risk of a
+   * torn write for a large asset split across multiple write() syscalls),
+   * and one caller's sourceUrl could be silently lost since neither took
+   * the "existing" branch. A second caller for the same hash instead awaits
+   * the first caller's write and only then records its sourceUrl against
+   * the one entry that actually got created.
+   */
+  private assetWritesInFlight = new Map<string, Promise<ArchivedAssetEntry>>();
+  private responseWritesInFlight = new Map<string, Promise<ArchivedResponseEntry>>();
 
   constructor(
     readonly archiveId: string,
@@ -500,59 +516,87 @@ export class SiteArchiveBuilder {
     screenshotFallback?: ScreenshotFallbackMeta,
   ): Promise<ArchivedAssetEntry> {
     const hash = sha256(data);
-    const existing = this.assets.get(hash);
-    if (existing) {
-      if (sourceUrl && !existing.sourceUrls.includes(sourceUrl)) {
-        existing.sourceUrls.push(sourceUrl);
+
+    const recordSourceUrl = async (entry: ArchivedAssetEntry) => {
+      if (sourceUrl && !entry.sourceUrls.includes(sourceUrl)) {
+        entry.sourceUrls.push(sourceUrl);
         await this.journal?.append({ t: 'assetUrl', sha: hash, url: sourceUrl });
       }
-      return existing;
-    }
-
-    const ext = extensionForContentType(contentType);
-    const relPath = `assets/${hash}.${ext}`;
-    await fs.writeFile(path.join(this.requireStaging(), relPath), data);
-    this.totalUncompressed += data.length;
-
-    const entry: ArchivedAssetEntry = {
-      sha256: hash,
-      path: relPath,
-      contentType,
-      byteSize: data.length,
-      kind: assetKindForContentType(contentType),
-      sourceUrls: sourceUrl ? [sourceUrl] : [],
-      ...(screenshotFallback ? { screenshotFallback } : {}),
+      return entry;
     };
-    this.assets.set(hash, entry);
-    // Journalled only after the bytes are on disk, so a replayed journal
-    // can never name an asset file that isn't there.
-    await this.journal?.append({ t: 'asset', e: entry });
-    return entry;
+
+    const existing = this.assets.get(hash);
+    if (existing) return recordSourceUrl(existing);
+
+    // A second concurrent caller for this exact hash awaits the same
+    // write rather than starting its own -- see the field doc above.
+    const inFlight = this.assetWritesInFlight.get(hash);
+    if (inFlight) return recordSourceUrl(await inFlight);
+
+    const writePromise = (async (): Promise<ArchivedAssetEntry> => {
+      const ext = extensionForContentType(contentType);
+      const relPath = `assets/${hash}.${ext}`;
+      await fs.writeFile(path.join(this.requireStaging(), relPath), data);
+      this.totalUncompressed += data.length;
+
+      const entry: ArchivedAssetEntry = {
+        sha256: hash,
+        path: relPath,
+        contentType,
+        byteSize: data.length,
+        kind: assetKindForContentType(contentType),
+        sourceUrls: sourceUrl ? [sourceUrl] : [],
+        ...(screenshotFallback ? { screenshotFallback } : {}),
+      };
+      this.assets.set(hash, entry);
+      // Journalled only after the bytes are on disk, so a replayed journal
+      // can never name an asset file that isn't there.
+      await this.journal?.append({ t: 'asset', e: entry });
+      return entry;
+    })();
+    this.assetWritesInFlight.set(hash, writePromise);
+    try {
+      return await writePromise;
+    } finally {
+      this.assetWritesInFlight.delete(hash);
+    }
   }
 
   async addResponse(data: Buffer, url: string, normalizedUrl: string, contentType: string, status: number): Promise<ArchivedResponseEntry> {
     const hash = sha256(data);
+
     const existing = this.responses.get(hash);
     if (existing) return existing;
 
-    const relPath = `responses/${hash}.json`;
-    await fs.writeFile(path.join(this.requireStaging(), relPath), data);
-    this.totalUncompressed += data.length;
+    const inFlight = this.responseWritesInFlight.get(hash);
+    if (inFlight) return inFlight;
 
-    const entry: ArchivedResponseEntry = {
-      sha256: hash,
-      path: relPath,
-      url,
-      normalizedUrl,
-      contentType,
-      byteSize: data.length,
-      method: 'GET',
-      status,
-    };
-    this.responses.set(hash, entry);
-    await this.journal?.append({ t: 'response', e: entry });
-    await this.setRoute({ normalizedUrl, target: { type: 'response', sha256: hash } });
-    return entry;
+    const writePromise = (async (): Promise<ArchivedResponseEntry> => {
+      const relPath = `responses/${hash}.json`;
+      await fs.writeFile(path.join(this.requireStaging(), relPath), data);
+      this.totalUncompressed += data.length;
+
+      const entry: ArchivedResponseEntry = {
+        sha256: hash,
+        path: relPath,
+        url,
+        normalizedUrl,
+        contentType,
+        byteSize: data.length,
+        method: 'GET',
+        status,
+      };
+      this.responses.set(hash, entry);
+      await this.journal?.append({ t: 'response', e: entry });
+      await this.setRoute({ normalizedUrl, target: { type: 'response', sha256: hash } });
+      return entry;
+    })();
+    this.responseWritesInFlight.set(hash, writePromise);
+    try {
+      return await writePromise;
+    } finally {
+      this.responseWritesInFlight.delete(hash);
+    }
   }
 
   async addPage(input: {

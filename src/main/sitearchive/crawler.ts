@@ -89,6 +89,16 @@ const MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS = 3;
  * large marketing site) and still lets a 50,000-page crawl make progress.
  */
 const PAGE_CAPTURE_BUDGET_MS = 120_000;
+/**
+ * How long an idle worker waits before rechecking the queue.
+ *
+ * An idle worker (queue momentarily empty, but another worker is still
+ * busy and might discover more links) can't just exit -- but it also
+ * shouldn't busy-loop. This is short enough that a worker picks up newly
+ * discovered work almost immediately, and long enough not to matter for
+ * CPU use against page loads that take seconds.
+ */
+const WORKER_IDLE_POLL_MS = 100;
 
 /**
  * Crawls a site within scope and writes a .sitearchive.
@@ -123,16 +133,42 @@ export class CaptureJob {
   private resumeFn: (() => void) | null = null;
   private cancelled = false;
   private pagesCompleted = 0;
+  /**
+   * Pages claimed by a worker but not yet resolved (success or failure).
+   *
+   * `pagesCompleted + pagesInFlight` is the number the maxPages check
+   * compares against, not `pagesCompleted` alone -- see runWorker() for
+   * why: checking completed-only lets multiple workers each see room
+   * under the budget before any of them finishes, overshooting maxPages
+   * by up to (concurrency - 1) pages.
+   */
+  private pagesInFlight = 0;
   private pagesDiscovered = 0;
   private bytesDownloaded = 0;
   private warningCount = 0;
+  /** Whichever page most recently started, across every worker -- see runWorker(). */
   private currentUrl: string | null = null;
   private siteTitle = '';
   private listeners: ProgressListener[] = [];
-  private view: WebContentsView | null = null;
-  private consecutiveScreenshotDegradations = 0;
+  /** One hidden view per worker, indexed the same as `workers` below. */
+  private views: (WebContentsView | null)[] = [];
   private degradedScreenshotCount = 0;
-  private forceViewRecycle = false;
+  /**
+   * Per-worker state that used to be single shared fields, before pages
+   * were captured in parallel (see runWorker()). Each worker gets its own
+   * screenshot-degradation streak and view-recycle countdown because both
+   * are about *that worker's own renderer* looking wedged or having grown
+   * -- a different worker's renderer is a different process, unaffected.
+   */
+  private workers: Array<{
+    consecutiveScreenshotDegradations: number;
+    forceViewRecycle: boolean;
+    pagesSinceRecycle: number;
+  }> = [];
+  /** How many workers are mid-page right now -- see runWorker()'s termination check. */
+  private busyWorkers = 0;
+  /** Only the first worker to notice a stop condition should record why. */
+  private stopReasonRecorded = false;
   private journal: CaptureJournal | null = null;
   /** Set when the run failed in a way the user could still recover from. */
   private keepStagingForRecovery = false;
@@ -259,7 +295,11 @@ export class CaptureJob {
     }
     this.builder.setJournal(this.journal);
 
-    this.createView();
+    // scope.concurrency is already clamped to [1, SCOPE_HARD_LIMITS.maxConcurrency]
+    // by CaptureManager.clampScope(); Math.max(1, ...) is just defense in
+    // depth against a resumed capture's older/unclamped scope.
+    const workerCount = Math.max(1, this.scope.concurrency);
+    this.createViews(workerCount);
     this.state = 'running';
 
     if (!this.resumeFrom) {
@@ -270,69 +310,17 @@ export class CaptureJob {
     let startFinalUrl = this.startUrl;
 
     try {
-      while (this.queue.size > 0 && !this.cancelled) {
-        await this.waitIfPaused();
-        if (this.cancelled) break;
-
-        // A null limit means the user explicitly chose "no limit".
-        if (this.scope.maxPages !== null && this.pagesCompleted >= this.scope.maxPages) {
-          logger.info('sitearchive.page_limit_reached', { limit: this.scope.maxPages });
-          await this.recordLimitStop(`Stopped at the page limit of ${this.scope.maxPages}`);
-          break;
-        }
-        if (this.scope.maxTotalBytes !== null && this.builder.totalBytes >= this.scope.maxTotalBytes) {
-          logger.info('sitearchive.size_limit_reached', {});
-          await this.recordLimitStop('Stopped at the archive size limit');
-          break;
-        }
-
-        // Disk-space floor, enforced even when every other limit is
-        // unlimited -- "no limit" must never mean "fill the user's drive".
-        if (!(await hasFreeDiskSpace(app.getPath('temp'), MIN_FREE_DISK_BYTES))) {
-          logger.warn('sitearchive.stopped_low_disk', {});
-          await this.builder.addFailure({
-            url: this.currentUrl ?? this.startUrl,
-            kind: 'too-large',
-            message: 'Capture stopped: the disk is running out of free space.',
-            discoveredOn: null,
-          });
-          break;
-        }
-
-        const item = this.queue.shift()!;
-        this.currentUrl = item.url;
-        // Recorded before the attempt, so a crawl resumed after a crash
-        // doesn't retry the page that was in flight when it died -- which
-        // is also the page most likely to have caused the death.
-        const itemNormalized = normalizeUrl(item.url);
-        if (itemNormalized) await this.journal?.append({ t: 'deq', norm: itemNormalized });
-        this.emit();
-
-        const captured = await this.capturePageSafely(item, startOrigin);
-        if (captured?.isStart) startFinalUrl = captured.finalUrl;
-
-        await this.journal?.append({
-          t: 'stat',
-          bytesDownloaded: this.bytesDownloaded,
-          warnings: this.warningCount,
-          total: this.builder.totalBytes,
-          title: this.siteTitle,
-        });
-
-        // Periodically rebuild the crawling view so a long, unlimited
-        // crawl doesn't accumulate renderer memory until it's killed --
-        // or early, if the renderer looks wedged.
-        const dueForRecycle = this.pagesCompleted > 0 && this.pagesCompleted % PAGES_PER_VIEW_RECYCLE === 0;
-        if ((dueForRecycle || this.forceViewRecycle) && this.queue.size > 0) {
-          this.forceViewRecycle = false;
-          await this.recycleView();
-        }
-
-        // Politeness delay between page loads.
-        if (this.scope.crawlDelayMs > 0 && this.queue.size > 0) {
-          await sleep(this.scope.crawlDelayMs);
-        }
-      }
+      // Each worker runs the same loop body the old single-threaded crawl
+      // used to run once, against its own hidden view -- see runWorker()
+      // for how they share the queue and builder safely, and how they
+      // agree when there's truly nothing left for anyone to do.
+      await Promise.all(
+        Array.from({ length: workerCount }, (_, workerIndex) =>
+          this.runWorker(workerIndex, startOrigin, (finalUrl) => {
+            startFinalUrl = finalUrl;
+          }),
+        ),
+      );
 
       if (this.cancelled) {
         this.state = 'cancelled';
@@ -405,13 +393,156 @@ export class CaptureJob {
       if (!this.keepStagingForRecovery) {
         await this.builder.cleanup().catch(() => {});
       }
-      this.destroyView();
+      this.destroyViews();
     }
   }
 
-  /** A hidden view, so crawling never disturbs the user's actual tab. */
-  private createView(): void {
-    this.view = new WebContentsView({
+  /**
+   * Run one worker: pull items off the shared queue, capture them against
+   * this worker's own hidden view, and stop only once the queue is empty
+   * AND no worker is still busy (a busy worker might be about to discover
+   * and enqueue more links -- see the termination check below).
+   *
+   * Every field this touches that isn't already worker-scoped (the queue,
+   * queuedOrDone, the builder, the running counters) is safe to share
+   * across concurrent workers: see the field comments on `workers` and
+   * `busyWorkers` above, and the in-flight-write guards added to
+   * SiteArchiveBuilder.addAsset/addResponse for the one place a real race
+   * existed (two workers storing identical content-addressed bytes at
+   * once).
+   */
+  private async runWorker(
+    workerIndex: number,
+    startOrigin: string,
+    onStartPageCaptured: (finalUrl: string) => void,
+  ): Promise<void> {
+    for (;;) {
+      await this.waitIfPaused();
+      if (this.cancelled) return;
+
+      if (this.scope.maxTotalBytes !== null && this.builder.totalBytes >= this.scope.maxTotalBytes) {
+        logger.info('sitearchive.size_limit_reached', {});
+        await this.recordLimitStopOnce('Stopped at the archive size limit');
+        return;
+      }
+
+      // Disk-space floor, enforced even when every other limit is
+      // unlimited -- "no limit" must never mean "fill the user's drive".
+      if (!(await hasFreeDiskSpace(app.getPath('temp'), MIN_FREE_DISK_BYTES))) {
+        await this.recordLowDiskStopOnce();
+        return;
+      }
+
+      // Everything from here to `this.pagesInFlight += 1` below is
+      // synchronous -- no `await` -- which is what makes this an atomic
+      // claim rather than a check-then-act race. Two workers checking
+      // `pagesCompleted + pagesInFlight` against maxPages and only THEN
+      // claiming a slot (with an await in between, e.g. the disk-space
+      // check above) could both pass the check before either claims,
+      // exactly like the addAsset race fixed in archiveWriter.ts -- which
+      // is what let a 2-worker, maxPages:3 capture complete 4 pages before
+      // this existed. A page that fails doesn't become a completed page,
+      // so its claimed slot is released in the finally block below,
+      // matching the original single-worker behaviour where a failed
+      // fetch never counted against the page budget.
+      if (this.scope.maxPages !== null && this.pagesCompleted + this.pagesInFlight >= this.scope.maxPages) {
+        logger.info('sitearchive.page_limit_reached', { limit: this.scope.maxPages });
+        await this.recordLimitStopOnce(`Stopped at the page limit of ${this.scope.maxPages}`);
+        return;
+      }
+
+      if (this.queue.size === 0) {
+        if (this.busyWorkers === 0) return; // nothing queued, nobody could add to it -- genuinely done
+        await sleep(WORKER_IDLE_POLL_MS);
+        continue;
+      }
+
+      const item = this.queue.shift()!;
+      this.pagesInFlight += 1;
+      this.busyWorkers += 1;
+      try {
+        this.currentUrl = item.url;
+        // Recorded before the attempt, so a crawl resumed after a crash
+        // doesn't retry the page that was in flight when it died -- which
+        // is also the page most likely to have caused the death.
+        const itemNormalized = normalizeUrl(item.url);
+        if (itemNormalized) await this.journal?.append({ t: 'deq', norm: itemNormalized });
+        this.emit();
+
+        const captured = await this.capturePageSafely(workerIndex, item, startOrigin);
+        if (captured?.isStart) onStartPageCaptured(captured.finalUrl);
+
+        await this.journal?.append({
+          t: 'stat',
+          bytesDownloaded: this.bytesDownloaded,
+          warnings: this.warningCount,
+          total: this.builder.totalBytes,
+          title: this.siteTitle,
+        });
+
+        // Periodically rebuild this worker's view so a long, unlimited
+        // crawl doesn't accumulate renderer memory until it's killed --
+        // or early, if the renderer looks wedged. Counted per worker,
+        // since it's that worker's own renderer process whose memory (or
+        // wedged-ness) this is about.
+        const worker = this.workers[workerIndex]!;
+        worker.pagesSinceRecycle += 1;
+        const dueForRecycle = worker.pagesSinceRecycle >= PAGES_PER_VIEW_RECYCLE;
+        if ((dueForRecycle || worker.forceViewRecycle) && this.queue.size > 0 && !this.cancelled) {
+          worker.forceViewRecycle = false;
+          worker.pagesSinceRecycle = 0;
+          await this.recycleView(workerIndex);
+        }
+      } finally {
+        // Released unconditionally: capturePageSafely already increments
+        // pagesCompleted itself on success, so this is a no-op toward the
+        // budget for a success (the slot just becomes permanent) and a
+        // real release for a failure (the slot becomes claimable again).
+        this.pagesInFlight -= 1;
+        this.busyWorkers -= 1;
+      }
+
+      // Politeness delay between this worker's own page loads -- with N
+      // workers each observing it independently, the aggregate request
+      // rate scales with concurrency, same as N polite visitors browsing
+      // at once rather than one visitor browsing N times faster.
+      if (this.scope.crawlDelayMs > 0) {
+        await sleep(this.scope.crawlDelayMs);
+      }
+    }
+  }
+
+  /** Only the first worker to notice should record why the crawl stopped early. */
+  private async recordLimitStopOnce(reason: string): Promise<void> {
+    if (this.stopReasonRecorded) return;
+    this.stopReasonRecorded = true;
+    await this.recordLimitStop(reason);
+  }
+
+  private async recordLowDiskStopOnce(): Promise<void> {
+    if (this.stopReasonRecorded) return;
+    this.stopReasonRecorded = true;
+    logger.warn('sitearchive.stopped_low_disk', {});
+    await this.builder.addFailure({
+      url: this.currentUrl ?? this.startUrl,
+      kind: 'too-large',
+      message: 'Capture stopped: the disk is running out of free space.',
+      discoveredOn: null,
+    });
+  }
+
+  /** One hidden view per worker, so crawling never disturbs the user's actual tab. */
+  private createViews(count: number): void {
+    this.views = [];
+    this.workers = [];
+    for (let i = 0; i < count; i += 1) {
+      this.views.push(this.newView());
+      this.workers.push({ consecutiveScreenshotDegradations: 0, forceViewRecycle: false, pagesSinceRecycle: 0 });
+    }
+  }
+
+  private newView(): WebContentsView {
+    const view = new WebContentsView({
       webPreferences: {
         session: this.session,
         sandbox: true,
@@ -423,54 +554,66 @@ export class CaptureJob {
         offscreen: false,
       },
     });
-    this.window.contentView.addChildView(this.view);
+    this.window.contentView.addChildView(view);
     // A real viewport size so layout and lazy-loading behave normally.
-    this.view.setBounds({ x: 0, y: 0, width: 1280, height: 900 });
-    this.view.setVisible(false);
+    view.setBounds({ x: 0, y: 0, width: 1280, height: 900 });
+    view.setVisible(false);
+    return view;
   }
 
   /**
-   * Tear the crawling view down and build a fresh one.
+   * Tear one worker's view down and build a fresh one.
    *
    * A single renderer navigated through hundreds of media-heavy pages
    * accumulates memory that never comes back (caches, detached documents,
    * JS heap growth), and eventually the process is killed mid-crawl --
    * observed on a real site at ~85 pages. Recycling the view periodically
    * hands that memory back to the OS. The crawl queue and the archive
-   * builder live outside the view, so nothing captured so far is lost.
+   * builder live outside any one view, so nothing captured so far is lost.
+   *
+   * Deliberately does NOT clear `this.session`'s HTTP cache the way the
+   * single-worker version used to: the session is shared across every
+   * worker (same login/cookies for the whole crawl), so clearing it here
+   * would evict other workers' still-useful cached responses and disrupt
+   * whatever they currently have in flight, on every one of N workers'
+   * independent recycle cadences rather than once for the whole crawl.
+   * The renderer-process teardown below is what actually reclaims memory;
+   * the cache clear was a secondary, session-wide effect that doesn't
+   * belong to one worker to trigger.
    */
-  private async recycleView(): Promise<void> {
+  private async recycleView(workerIndex: number): Promise<void> {
+    const view = this.views[workerIndex];
     // Sampled on the *old* view right before it's torn down, so this line
     // says how much the renderer had grown to by the time recycling
     // triggered -- the docstring above asserts recycling reclaims that
     // memory, but nothing previously measured whether it actually does.
-    const memory =
-      this.view && !this.view.webContents.isDestroyed() ? sampleCaptureMemory(this.view.webContents) : null;
+    const memory = view && !view.webContents.isDestroyed() ? sampleCaptureMemory(view.webContents) : null;
     logger.info('sitearchive.recycling_view', {
+      workerIndex,
       pagesCompleted: this.pagesCompleted,
       rendererBytesBeforeRecycle: memory?.rendererBytes ?? null,
       rendererPeakBytesBeforeRecycle: memory?.rendererPeakBytes ?? null,
     });
-    this.destroyView();
+    this.destroyView(workerIndex);
     // Let the old renderer process actually go away before starting another.
     await sleep(500);
-    try {
-      await this.session.clearCache();
-    } catch {
-      // Best effort; a cache clear failing is not worth aborting for.
-    }
-    if (!this.cancelled) this.createView();
+    if (!this.cancelled) this.views[workerIndex] = this.newView();
   }
 
-  private destroyView(): void {
-    if (!this.view) return;
+  private destroyView(workerIndex: number): void {
+    const view = this.views[workerIndex];
+    if (!view) return;
     try {
-      this.window.contentView.removeChildView(this.view);
-      if (!this.view.webContents.isDestroyed()) this.view.webContents.close();
+      this.window.contentView.removeChildView(view);
+      if (!view.webContents.isDestroyed()) view.webContents.close();
     } catch {
       /* window may already be gone */
     }
-    this.view = null;
+    this.views[workerIndex] = null;
+  }
+
+  private destroyViews(): void {
+    for (let i = 0; i < this.views.length; i += 1) this.destroyView(i);
   }
 
   private async enqueue(item: QueueItem): Promise<void> {
@@ -515,10 +658,11 @@ export class CaptureJob {
   }
 
   private async capturePageSafely(
+    workerIndex: number,
     item: QueueItem,
     startOrigin: string,
   ): Promise<{ isStart: boolean; finalUrl: string } | null> {
-    const view = this.view;
+    const view = this.views[workerIndex];
     if (!view || view.webContents.isDestroyed()) return null;
 
     const normalized = normalizeUrl(item.url);
@@ -600,20 +744,22 @@ export class CaptureJob {
       this.warningCount += result.warnings.length;
       if (!this.siteTitle) this.siteTitle = result.title;
 
+      const worker = this.workers[workerIndex]!;
       if (result.screenshotDegraded) {
         this.degradedScreenshotCount += 1;
-        this.consecutiveScreenshotDegradations += 1;
+        worker.consecutiveScreenshotDegradations += 1;
         // Every Nth consecutive failure, not just the first: if the fresh
         // view is wedged too, keep trying rather than giving up silently.
-        if (this.consecutiveScreenshotDegradations % MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS === 0) {
+        if (worker.consecutiveScreenshotDegradations % MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS === 0) {
           logger.warn('sitearchive.screenshots_degraded_recycling_view', {
-            consecutive: this.consecutiveScreenshotDegradations,
+            workerIndex,
+            consecutive: worker.consecutiveScreenshotDegradations,
             pagesCompleted: this.pagesCompleted,
           });
-          this.forceViewRecycle = true;
+          worker.forceViewRecycle = true;
         }
       } else {
-        this.consecutiveScreenshotDegradations = 0;
+        worker.consecutiveScreenshotDegradations = 0;
       }
 
       // Discover further pages, unless we've hit the depth limit.

@@ -17,6 +17,7 @@ function defaultSettings(): AppSettings {
     searchEngineUrlTemplate: 'https://duckduckgo.com/?q=%s',
     screenshotQuality: 80,
     diagnosticLogging: false,
+    autoUpdateCheckEnabled: true,
     permissionDefaults: {
       notifications: 'deny',
       geolocation: 'ask',

@@ -75,3 +75,18 @@ fileAssociations:
 
 extraMetadata:
   main: dist/main/index.js
+
+# Where electron-updater checks for and downloads new releases from, and
+# where `npm run package:*:dist` would upload a build if ever run with
+# `--publish` (none of the package.json scripts pass that flag, and the
+# default policy when it's omitted -- "onTagOrDraft" -- only publishes in
+# CI against a matching git tag, so building locally never uploads
+# anything). Configuring this is also what makes electron-builder write
+# `app-update.yml` into the packaged app in the first place; without it,
+# electron-updater has no feed URL to check at all. See README "Auto-update"
+# for what's actually been verified here and what still needs a real
+# published (and, eventually, signed) release to test end to end.
+publish:
+  provider: github
+  owner: kevincalgary
+  repo: archivebro

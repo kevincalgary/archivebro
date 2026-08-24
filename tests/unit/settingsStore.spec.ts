@@ -28,6 +28,18 @@ describe('SettingsStore', () => {
     expect(s.retentionDays).toBeNull();
     expect(s.maxDiskUsageMb).toBeNull();
     expect(s.excludedDomains).toEqual([]);
+    // On by default (a documented, disclosed exception to "nothing sent
+    // anywhere" -- see README "Auto-update"), but the manual check is
+    // always available regardless of this setting.
+    expect(s.autoUpdateCheckEnabled).toBe(true);
+  });
+
+  it('persists autoUpdateCheckEnabled across a fresh load from disk', () => {
+    const store1 = new SettingsStore();
+    store1.update({ autoUpdateCheckEnabled: false });
+
+    const store2 = new SettingsStore();
+    expect(store2.get().autoUpdateCheckEnabled).toBe(false);
   });
 
   it('persists updates across a fresh load from disk', () => {

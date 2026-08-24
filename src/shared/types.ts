@@ -102,6 +102,37 @@ export interface AppSettings {
    * contains the addresses of pages visited.
    */
   diagnosticLogging: boolean;
+  /**
+   * On by default. When on, the app periodically checks GitHub Releases
+   * for a newer version (see "Auto-update" in the README) -- a real,
+   * disclosed exception to "nothing sent anywhere": this is the one
+   * network request the app makes on its own, unprompted by anything you
+   * do. Turning this off does not disable the manual "Check for updates
+   * now" button in Settings, which is an explicit action rather than
+   * something automatic.
+   */
+  autoUpdateCheckEnabled: boolean;
+}
+
+export type UpdateCheckState =
+  | 'idle'
+  | 'checking'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+  /** Running unpackaged (dev, tests, e2e) -- update checks are inert here by design, never touching the network. */
+  | 'unsupported-dev';
+
+export interface UpdateStatus {
+  state: UpdateCheckState;
+  /** The update's version, once known (downloading/downloaded); null otherwise. */
+  version: string | null;
+  /** 0-100 while downloading; null otherwise. */
+  progressPercent: number | null;
+  error: string | null;
+  /** ISO timestamp of the last state change, or null before any check has ever run. */
+  checkedAt: string | null;
 }
 
 export type PermissionKind =

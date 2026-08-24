@@ -83,6 +83,14 @@ export const Channels = {
   // Events pushed main -> renderer for capture/archives
   onSiteCaptureProgress: 'events:siteCaptureProgress',
   onSiteArchiveOpenRequest: 'events:siteArchiveOpenRequest',
+
+  // Auto-update (electron-updater). checkNow is always allowed regardless
+  // of settings.autoUpdateCheckEnabled -- an explicit click is its own
+  // consent; that setting only gates the unattended startup/periodic check.
+  updatesCheckNow: 'updates:checkNow',
+  updatesInstallNow: 'updates:installNow',
+  updatesGetStatus: 'updates:getStatus',
+  onUpdateStatus: 'events:updateStatus',
 } as const;
 
 export type ChannelName = (typeof Channels)[keyof typeof Channels];

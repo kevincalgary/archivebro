@@ -136,4 +136,9 @@ export const IpcSchemas = {
   [Channels.captureRecoveryResume]: z.object({ archiveId }),
   [Channels.captureRecoveryFinish]: z.object({ archiveId }),
   [Channels.captureRecoveryDiscard]: z.object({ archiveId }),
+
+  // --- Auto-update ---
+  [Channels.updatesCheckNow]: z.void(),
+  [Channels.updatesInstallNow]: z.void(),
+  [Channels.updatesGetStatus]: z.void(),
 } as const satisfies Partial<Record<ChannelName, z.ZodType>>;

@@ -10,6 +10,7 @@ import type {
   LibraryQuery,
   PermissionKind,
   TabState,
+  UpdateStatus,
 } from '../shared/types';
 import type {
   CaptureProgress,
@@ -112,6 +113,11 @@ const api = {
     confirmExternal: (url: string): Promise<{ opened: boolean; reason?: string }> =>
       ipcRenderer.invoke(Channels.siteArchiveConfirmExternal, { url }),
   },
+  updates: {
+    checkNow: (): Promise<UpdateStatus> => ipcRenderer.invoke(Channels.updatesCheckNow),
+    installNow: (): Promise<void> => ipcRenderer.invoke(Channels.updatesInstallNow),
+    getStatus: (): Promise<UpdateStatus> => ipcRenderer.invoke(Channels.updatesGetStatus),
+  },
   events: {
     onTabState: (cb: (state: TabState) => void) => subscribe<TabState>(Channels.onTabState, cb),
     onTabClosed: (cb: (tabId: string) => void) => subscribe<string>(Channels.onTabClosed, cb),
@@ -127,6 +133,7 @@ const api = {
     onSiteArchiveOpenRequest: (
       cb: (payload: { kind: 'open-live' | 'external' | 'open-archive'; url?: string; path?: string }) => void,
     ) => subscribe(Channels.onSiteArchiveOpenRequest, cb),
+    onUpdateStatus: (cb: (status: UpdateStatus) => void) => subscribe<UpdateStatus>(Channels.onUpdateStatus, cb),
   },
 };
 

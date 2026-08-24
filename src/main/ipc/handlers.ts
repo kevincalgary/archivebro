@@ -27,6 +27,7 @@ import {
   listRecoverableCapturesSummary,
 } from '../sitearchive/archiveWriter';
 import path from 'node:path';
+import type { UpdateService } from '../updates/updateService';
 
 interface Deps {
   mainWindow: BrowserWindow;
@@ -34,6 +35,7 @@ interface Deps {
   settings: SettingsStore;
   archiveRepo: ArchiveRepo;
   captureManager: CaptureManager;
+  updateService: UpdateService;
 }
 
 /**
@@ -49,7 +51,7 @@ interface Deps {
  *      a session, or a webContents.
  */
 export function registerIpcHandlers(deps: Deps): void {
-  const { mainWindow, tabManager, settings, archiveRepo, captureManager } = deps;
+  const { mainWindow, tabManager, settings, archiveRepo, captureManager, updateService } = deps;
 
   function handle<C extends keyof typeof IpcSchemas>(
     channel: C,
@@ -499,6 +501,12 @@ export function registerIpcHandlers(deps: Deps): void {
       throw err;
     }
   }
+
+  // --- Auto-update ---
+
+  handle(Channels.updatesCheckNow, () => updateService.checkNow());
+  handle(Channels.updatesInstallNow, () => updateService.installNow());
+  handle(Channels.updatesGetStatus, () => updateService.getStatus());
 }
 
 function sanitizeFilename(name: string): string {

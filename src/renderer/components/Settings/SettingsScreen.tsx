@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AppSettings, DiskUsageInfo, PermissionKind } from '../../../shared/types';
+import type { AppSettings, DiskUsageInfo, PermissionKind, UpdateStatus } from '../../../shared/types';
 import { LoadingPanel } from '../Progress';
 
 const PERMISSION_KINDS: PermissionKind[] = [
@@ -12,18 +12,46 @@ const PERMISSION_KINDS: PermissionKind[] = [
   'display-capture',
 ];
 
+function updateStatusText(status: UpdateStatus | null): string {
+  if (!status) return '';
+  switch (status.state) {
+    case 'idle':
+      return '';
+    case 'unsupported-dev':
+      return 'Not available in this build (unpackaged/development).';
+    case 'checking':
+      return 'Checking for updates…';
+    case 'not-available':
+      return "You're up to date.";
+    case 'downloading':
+      return status.version
+        ? `Downloading version ${status.version}${status.progressPercent != null ? ` (${status.progressPercent}%)` : ''}…`
+        : 'Downloading update…';
+    case 'downloaded':
+      return `Version ${status.version} is ready to install.`;
+    case 'error':
+      return `Update check failed: ${status.error ?? 'unknown error'}`;
+    default:
+      return '';
+  }
+}
+
 export default function SettingsScreen() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [newDomain, setNewDomain] = useState('');
   const [diskUsage, setDiskUsage] = useState<DiskUsageInfo | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   const refresh = () => {
     void window.archiveBrowser.settings.get().then(setSettings);
     void window.archiveBrowser.settings.getDiskUsage().then(setDiskUsage);
+    void window.archiveBrowser.updates.getStatus().then(setUpdateStatus);
   };
 
   useEffect(refresh, []);
+
+  useEffect(() => window.archiveBrowser.events.onUpdateStatus(setUpdateStatus), []);
 
   if (!settings) {
     return (
@@ -191,6 +219,35 @@ export default function SettingsScreen() {
             </select>
           </label>
         ))}
+      </section>
+
+      <section>
+        <h2>Updates</h2>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.autoUpdateCheckEnabled}
+            onChange={(e) => update({ autoUpdateCheckEnabled: e.target.checked })}
+          />
+          Automatically check for updates
+        </label>
+        <p className="settings-note">
+          On by default. This is the one network request Archive Browser makes on its own, unprompted by anything you
+          do — a periodic check against GitHub Releases for a newer version. Turning it off does not disable the
+          manual check below, since clicking it is its own explicit action.
+        </p>
+        <div className="field-row">
+          <button
+            disabled={updateStatus?.state === 'checking' || updateStatus?.state === 'downloading'}
+            onClick={async () => setUpdateStatus(await window.archiveBrowser.updates.checkNow())}
+          >
+            Check for updates now
+          </button>
+          {updateStatus?.state === 'downloaded' && (
+            <button onClick={() => window.archiveBrowser.updates.installNow()}>Restart and install</button>
+          )}
+        </div>
+        {updateStatusText(updateStatus) && <p className="settings-note">{updateStatusText(updateStatus)}</p>}
       </section>
 
       <section>

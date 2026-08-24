@@ -11,6 +11,7 @@ import RecoveryDialog from './components/Capture/RecoveryDialog';
 import { BusyOverlay } from './components/Progress';
 import PermissionPrompt, { type PermissionRequest } from './components/PermissionPrompt';
 import type { CaptureProgress, CaptureScope, RecoverableCaptureSummary } from '../shared/sitearchiveTypes';
+import type { UpdateStatus } from '../shared/types';
 
 export default function App() {
   const { tabs, activeTabId, screen, setTabs, upsertTab, removeTab, setActiveTabId, setScreen, setSettings } =
@@ -39,6 +40,10 @@ export default function App() {
   const [recoveryBusyId, setRecoveryBusyId] = useState<string | null>(null);
   const [recoveryErrors, setRecoveryErrors] = useState<Record<string, string>>({});
 
+  // --- Auto-update ---
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
+
   const openArchivePath = useCallback(async (archivePath: string) => {
     setOpeningArchive(archivePath);
     try {
@@ -59,6 +64,7 @@ export default function App() {
     void window.archiveBrowser.captureRecovery.list().then((list) => {
       if (list.length > 0) setRecoverable(list);
     });
+    void window.archiveBrowser.updates.getStatus().then(setUpdateStatus);
 
     const offTabState = window.archiveBrowser.events.onTabState((state) => {
       upsertTab(state);
@@ -127,6 +133,14 @@ export default function App() {
       }
     });
 
+    const offUpdateStatus = window.archiveBrowser.events.onUpdateStatus((status) => {
+      setUpdateStatus(status);
+      // A fresh downloaded-update notice deserves to be seen again even if
+      // an earlier one (e.g. from a prior version) was dismissed this
+      // session.
+      if (status.state === 'downloaded') setUpdateBannerDismissed(false);
+    });
+
     return () => {
       offTabState();
       offTabClosed();
@@ -135,6 +149,7 @@ export default function App() {
       offCaptureProgress();
       offPermission();
       offArchiveRequest();
+      offUpdateStatus();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -211,6 +226,15 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {updateStatus?.state === 'downloaded' && !updateBannerDismissed && (
+        <div className="update-banner">
+          <span>Version {updateStatus.version} is ready — restart to update.</span>
+          <button onClick={() => window.archiveBrowser.updates.installNow()}>Restart and update</button>
+          <button className="update-banner-dismiss" onClick={() => setUpdateBannerDismissed(true)}>
+            Not now
+          </button>
+        </div>
+      )}
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}

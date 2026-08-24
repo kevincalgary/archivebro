@@ -19,6 +19,7 @@ import { listRecoverableCaptures, sweepSiteArchiveStaging } from './sitearchive/
 import { registerArchiveSiteSchemeAsPrivileged, closeAllOpenedArchives } from './sitearchive/sitearchiveSession';
 import { setPermissionPromptEmitter, denyAllPendingPermissions } from './security/permissionPrompts';
 import { SITEARCHIVE_EXTENSION } from '../shared/sitearchiveTypes';
+import { UpdateService } from './updates/updateService';
 
 // Must run before app.whenReady().
 registerArchiveSchemeAsPrivileged();
@@ -70,6 +71,7 @@ if (!gotSingleInstanceLock) {
 }
 
 let storageInterval: ReturnType<typeof setInterval> | null = null;
+let updateService: UpdateService | null = null;
 
 async function main(): Promise<void> {
   initLogger();
@@ -112,8 +114,11 @@ async function main(): Promise<void> {
   const tabManager = new TabManager(mainWindow, settings, captureService);
   const captureManager = new CaptureManager();
 
-  registerIpcHandlers({ mainWindow, tabManager, settings, archiveRepo, captureManager });
-  buildAppMenu(mainWindow, tabManager);
+  updateService = new UpdateService(mainWindow, settings);
+  updateService.start();
+
+  registerIpcHandlers({ mainWindow, tabManager, settings, archiveRepo, captureManager, updateService });
+  buildAppMenu(mainWindow, tabManager, () => void updateService?.checkNow());
   installTestHooks({ archiveRepo, settings, tabManager, captureManager });
 
   // Route "ask" permission requests to the trusted UI. If the window is
@@ -209,6 +214,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   if (storageInterval) clearInterval(storageInterval);
+  updateService?.stop();
   closeAllOpenedArchives();
   closeDatabase();
 });

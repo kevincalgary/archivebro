@@ -10,7 +10,7 @@ import { Channels } from '../../shared/ipcContract';
  * address bar, switching screens) are pushed to the renderer as a
  * 'events:menuAction' message for the React UI to handle.
  */
-export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager): void {
+export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager, checkForUpdates?: () => void): void {
   const send = (action: string) => mainWindow.webContents.send(Channels.onMenuAction, action);
   const activeTabId = () => tabManager.getActiveTabId();
 
@@ -117,6 +117,10 @@ export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager):
       label: 'Archive Browser',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        // Also available in Settings, for Windows/Linux (which have no app
+        // menu) and anyone who'd rather not use the menu bar.
+        { label: 'Check for Updates…', click: () => checkForUpdates?.() },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },

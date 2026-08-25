@@ -42,6 +42,7 @@ export default function SettingsScreen() {
   const [diskUsage, setDiskUsage] = useState<DiskUsageInfo | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [libraryTransferStatus, setLibraryTransferStatus] = useState('');
 
   const refresh = () => {
     void window.archiveBrowser.settings.get().then(setSettings);
@@ -302,6 +303,36 @@ export default function SettingsScreen() {
             Import settings…
           </button>
         </div>
+        <div className="field-row">
+          <button
+            onClick={async () => {
+              const result = await window.archiveBrowser.library.exportAll();
+              setLibraryTransferStatus(
+                result.exported ? `Exported ${result.archiveCount} archived page${result.archiveCount === 1 ? '' : 's'}.` : '',
+              );
+            }}
+          >
+            Export whole library…
+          </button>
+          <button
+            onClick={async () => {
+              const result = await window.archiveBrowser.library.importAll();
+              if (!result.imported) return;
+              setLibraryTransferStatus(
+                `Imported ${result.importedCount}${result.skippedCount ? `, skipped ${result.skippedCount} already present` : ''}${result.failedCount ? `, ${result.failedCount} failed` : ''}.`,
+              );
+              refresh();
+            }}
+          >
+            Import whole library…
+          </button>
+        </div>
+        {libraryTransferStatus && <p className="settings-note">{libraryTransferStatus}</p>}
+        <p className="settings-note">
+          Export bundles every archived page (files + catalog entries) into one portable zip, for backing up or
+          moving your Library to another machine. Import adds archives from that zip that aren't already in this
+          Library — existing archives are never overwritten.
+        </p>
       </section>
     </div>
   );

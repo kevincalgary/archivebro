@@ -86,7 +86,11 @@ interface RawEntry {
   compressedSize: number;
 }
 
-function openZip(filePath: string): Promise<yauzl.ZipFile> {
+// Exported (not just used by OpenedArchive) so libraryTransfer.ts -- which
+// reads a different, unrelated zip format for whole-library export/import
+// -- can reuse the same safe-open/bounded-read primitives instead of a
+// second implementation that could drift from this one.
+export function openZip(filePath: string): Promise<yauzl.ZipFile> {
   return new Promise((resolve, reject) => {
     yauzl.open(filePath, { lazyEntries: true, autoClose: false }, (err, zipfile) => {
       if (err || !zipfile) {
@@ -98,7 +102,7 @@ function openZip(filePath: string): Promise<yauzl.ZipFile> {
   });
 }
 
-function readEntryBuffer(zipfile: yauzl.ZipFile, entry: yauzl.Entry, maxBytes: number): Promise<Buffer> {
+export function readEntryBuffer(zipfile: yauzl.ZipFile, entry: yauzl.Entry, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     zipfile.openReadStream(entry, (err, stream) => {
       if (err || !stream) {

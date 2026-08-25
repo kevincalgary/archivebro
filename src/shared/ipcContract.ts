@@ -69,6 +69,8 @@ export const IpcSchemas = {
   [Channels.libraryOpenOffline]: z.object({ archiveId }),
   [Channels.libraryOpenLive]: z.object({ archiveId }),
   [Channels.libraryFindArchiveForUrl]: z.object({ url: nonEmptyString }),
+  [Channels.libraryExportAll]: z.void(),
+  [Channels.libraryImportAll]: z.void(),
 
   [Channels.settingsGet]: z.void(),
   [Channels.settingsUpdate]: z.object({

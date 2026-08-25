@@ -10,6 +10,7 @@ import type { CaptureProgress, CaptureResult, CaptureScope } from '../shared/sit
 import { openSiteArchive } from './sitearchive/archiveReader';
 import { registerOpenedArchive, getSiteArchiveSession } from './sitearchive/sitearchiveSession';
 import { discardRecoveredCapture, finalizeRecoveredCapture, listRecoverableCaptures } from './sitearchive/archiveWriter';
+import { exportLibrary, importLibrary, type LibraryImportResult } from './library/libraryTransfer';
 
 /**
  * A narrow, explicit back door for end-to-end tests. Playwright's Electron
@@ -66,6 +67,10 @@ export interface TestHooks {
   resumeInterruptedCapture: (stagingDir: string) => Promise<{ jobId: string } | null>;
   /** Throw away an interrupted capture and everything it staged. */
   discardRecoveredCapture: (stagingDir: string) => Promise<boolean>;
+  /** Export the whole Library without going through the save dialog. */
+  exportLibraryToPath: (destZipPath: string) => Promise<{ archiveCount: number }>;
+  /** Import a whole-library export without going through the open dialog. */
+  importLibraryFromPath: (zipPath: string) => Promise<LibraryImportResult>;
 }
 
 declare global {
@@ -189,5 +194,9 @@ export function installTestHooks(
       capturePromise = started.promise.catch(() => null);
       return { jobId: started.jobId };
     },
+    exportLibraryToPath: (destZipPath: string) =>
+      exportLibrary(hooks.settings.get().archiveStorageDir, hooks.archiveRepo, destZipPath, app.getVersion()),
+    importLibraryFromPath: (zipPath: string) =>
+      importLibrary(zipPath, hooks.settings.get().archiveStorageDir, hooks.archiveRepo),
   };
 }

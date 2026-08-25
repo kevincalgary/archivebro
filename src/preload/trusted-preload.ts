@@ -62,6 +62,10 @@ const api = {
     openLive: (archiveId: string): Promise<string> => ipcRenderer.invoke(Channels.libraryOpenLive, { archiveId }),
     findArchiveForUrl: (url: string): Promise<ArchiveRecord | null> =>
       ipcRenderer.invoke(Channels.libraryFindArchiveForUrl, { url }),
+    exportAll: (): Promise<{ exported: boolean; path?: string; archiveCount?: number }> =>
+      ipcRenderer.invoke(Channels.libraryExportAll),
+    importAll: (): Promise<{ imported: boolean; importedCount?: number; skippedCount?: number; failedCount?: number }> =>
+      ipcRenderer.invoke(Channels.libraryImportAll),
   },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke(Channels.settingsGet),

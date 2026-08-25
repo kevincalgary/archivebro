@@ -43,6 +43,8 @@ export const Channels = {
   libraryOpenOffline: 'library:openOffline',
   libraryOpenLive: 'library:openLive',
   libraryFindArchiveForUrl: 'library:findArchiveForUrl',
+  libraryExportAll: 'library:exportAll',
+  libraryImportAll: 'library:importAll',
 
   // Settings
   settingsGet: 'settings:get',

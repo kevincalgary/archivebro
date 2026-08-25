@@ -12,6 +12,7 @@ import { logger, setDiagnosticLogging } from '../util/logger';
 import { resolvePermissionRequest } from '../security/permissionPrompts';
 import { canonicalizeUrl } from '../browser/urlUtils';
 import { zipArchiveDirectory } from '../util/zipExport';
+import { exportLibrary, importLibrary, LibraryTransferError } from '../library/libraryTransfer';
 import { moveArchiveStorage } from '../util/moveStorage';
 import type { DiskUsageInfo } from '../../shared/types';
 import type { CaptureManager } from '../sitearchive/captureManager';
@@ -153,6 +154,45 @@ export function registerIpcHandlers(deps: Deps): void {
 
   handle(Channels.libraryFindArchiveForUrl, (args) => {
     return archiveRepo.findMostRecentByCanonicalUrl(canonicalizeUrl(args.url));
+  });
+
+  handle(Channels.libraryExportAll, async () => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Whole Library',
+      defaultPath: `archive-browser-library-${new Date().toISOString().slice(0, 10)}.zip`,
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    });
+    if (result.canceled || !result.filePath) return { exported: false as const };
+    const { archiveCount } = await exportLibrary(
+      settings.get().archiveStorageDir,
+      archiveRepo,
+      result.filePath,
+      app.getVersion(),
+    );
+    logger.info('library.export_completed', { archiveCount });
+    return { exported: true as const, path: result.filePath, archiveCount };
+  });
+
+  handle(Channels.libraryImportAll, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import Whole Library',
+      properties: ['openFile'],
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { imported: false as const };
+    const filePath = result.filePaths[0];
+    if (!filePath) return { imported: false as const };
+    try {
+      const stats = await importLibrary(filePath, settings.get().archiveStorageDir, archiveRepo);
+      logger.info('library.import_completed', { ...stats });
+      return { imported: true as const, ...stats };
+    } catch (err) {
+      if (err instanceof LibraryTransferError) {
+        logger.error('library.import_rejected', { code: err.code, error: err.message });
+        throw new Error(err.message);
+      }
+      throw err;
+    }
   });
 
   // --- Settings ---

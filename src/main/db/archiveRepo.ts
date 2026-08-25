@@ -60,6 +60,12 @@ function rowToRecord(row: ArchiveRow): ArchiveRecord {
   };
 }
 
+/** One archive's row + which content files it actually has, for whole-library export (see libraryTransfer.ts). */
+export interface ArchiveExportEntry extends NewArchiveInput {
+  tags: string[];
+  hasFavicon: boolean;
+}
+
 export interface NewArchiveInput {
   id: string;
   canonicalUrl: string;
@@ -283,6 +289,51 @@ export class ArchiveRepo {
       .prepare('SELECT * FROM archives WHERE deleted = 0 ORDER BY visited_at ASC LIMIT ?')
       .all(limit) as ArchiveRow[];
     return rows.map(rowToRecord);
+  }
+
+  /** Every active archive's full row, for whole-library export (libraryTransfer.ts). */
+  listAllForExport(): ArchiveExportEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM archives WHERE deleted = 0 ORDER BY visited_at ASC')
+      .all() as ArchiveRow[];
+    return rows.map((row) => ({
+      id: row.id,
+      canonicalUrl: row.canonical_url,
+      originalUrl: row.original_url,
+      finalUrl: row.final_url,
+      title: row.title,
+      domain: row.domain,
+      // Never exported: an absolute path only meaningful on this machine.
+      // Recomputed on import from whether a favicon file actually comes
+      // along (hasFavicon below).
+      faviconPath: null,
+      referrerUrl: row.referrer_url,
+      capturedAt: row.captured_at,
+      visitedAt: row.visited_at,
+      status: row.status,
+      warnings: JSON.parse(row.warnings_json) as CaptureWarning[],
+      sizeBytes: row.size_bytes,
+      appVersion: row.app_version,
+      schemaVersion: row.schema_version,
+      hasMhtml: row.has_mhtml === 1,
+      hasScreenshot: row.has_screenshot === 1,
+      hasText: row.has_text === 1,
+      mhtmlSha256: row.mhtml_sha256,
+      screenshotSha256: row.screenshot_sha256,
+      textSha256: row.text_sha256,
+      tags: JSON.parse(row.tags_json) as string[],
+      hasFavicon: row.favicon_path !== null,
+    }));
+  }
+
+  /**
+   * True if a row with this id exists at all, deleted or not -- `id` is
+   * the primary key, so a whole-library import must check this (not just
+   * the non-deleted view every other query uses) before inserting, or a
+   * duplicate id collides with a soft-deleted row still occupying it.
+   */
+  existsAnyById(id: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM archives WHERE id = ?').get(id);
   }
 
   // --- crash recovery bookkeeping ---

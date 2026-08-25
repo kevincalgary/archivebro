@@ -198,6 +198,18 @@ export function testHooks(app: ElectronApplication) {
         ({}, id: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.isInterruptedCaptureTracked(id),
         archiveId,
       ),
+    exportLibraryToPath: (destZipPath: string): Promise<{ archiveCount: number }> =>
+      app.evaluate(
+        ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.exportLibraryToPath(p),
+        destZipPath,
+      ),
+    importLibraryFromPath: (
+      zipPath: string,
+    ): Promise<{ importedCount: number; skippedCount: number; failedCount: number }> =>
+      app.evaluate(
+        ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.importLibraryFromPath(p),
+        zipPath,
+      ),
   };
 }
 

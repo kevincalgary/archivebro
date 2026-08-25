@@ -306,6 +306,20 @@ export function registerIpcHandlers(deps: Deps): void {
   handle(Channels.siteCaptureResume, (args) => ({ ok: captureManager.resume(args.jobId) }));
   handle(Channels.siteCaptureCancel, (args) => ({ ok: captureManager.cancel(args.jobId) }));
 
+  handle(Channels.siteCaptureRetryFailed, (args) => {
+    if (captureManager.isBusy) return { started: false };
+    const { jobId, promise } = captureManager.retryFailedPages({
+      window: mainWindow,
+      session: session.fromPartition('persist:browsing'),
+      archivePath: args.archivePath,
+    });
+    // Progress (including completion) reaches the renderer through the
+    // same capture progress event a fresh capture uses -- see
+    // siteCaptureStart above.
+    void promise.catch(() => {});
+    return { started: true, jobId };
+  });
+
   // --- Recovering an interrupted .sitearchive capture ---
   // Every handler below re-derives the staging directory from the given
   // archiveId via SiteArchiveBuilder.stagingDirFor rather than accepting a
@@ -343,6 +357,7 @@ export function registerIpcHandlers(deps: Deps): void {
     // result" UI of its own.
     const progress: CaptureProgress = {
       jobId: `recovered-${args.archiveId}`,
+      kind: 'capture',
       state: 'completed',
       siteTitle: finished.siteTitle,
       startUrl: finished.startUrl,

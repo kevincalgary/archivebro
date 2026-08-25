@@ -269,6 +269,23 @@ const routes = {
     ),
   }),
 
+  // Entry point for resume-only retry tests only (tests/e2e/sitearchive-retry.spec.ts):
+  // two normal pages plus /flaky, so a whole-site capture from here has
+  // something that already succeeded to prove retry leaves alone. Not
+  // linked from "/" or anywhere else, so no other test's whole-site crawl
+  // ever reaches it.
+  '/retry-test-hub': () => ({
+    body: layout(
+      'Retry Test Hub',
+      `<h1>Retry Test Hub</h1>
+       <ul>
+         <li><a href="/about">About</a></li>
+         <li><a href="/products/widget">Widget</a></li>
+         <li><a href="/flaky">Flaky</a></li>
+       </ul>`,
+    ),
+  }),
+
   // Pages used by the image screenshot fallback tests.
   '/images': () => ({
     body: layout(
@@ -388,6 +405,20 @@ function forumRoute(pathname) {
 function startSiteFixtureServer(port = 0) {
   let requestCount = 0;
   const requestLog = [];
+  // Resume-only retry tests (tests/e2e/sitearchive-retry.spec.ts): while
+  // broken, /flaky bounces to /flaky-2 and back -- a real redirect-loop
+  // failure, detected the same way an actually-unfixable loop is (see
+  // crawler.ts's loadUrl) -- so the original capture records it as
+  // failed. A two-hop loop (like the existing /redirect-loop-a <->
+  // /redirect-loop-b pair below) is used rather than a URL redirecting to
+  // itself: a same-URL redirect crashed the whole app (SIGTRAP) when
+  // exercised through a real capture, so this sticks to the already-proven
+  // two-hop shape. GET /flaky-fix flips it to serving normal content, so a
+  // test can simulate "the site got fixed" before retrying, deterministically
+  // rather than by guessing a request count. Only reachable from
+  // /retry-test-hub, which nothing else links to, so no other test's
+  // whole-site crawl is affected by it.
+  let flakyFixed = false;
 
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -397,6 +428,30 @@ function startSiteFixtureServer(port = 0) {
       // Any non-GET request is a test failure signal: the crawler must
       // never issue one. Recorded so tests can assert on it.
       const url = new URL(req.url ?? '/', 'http://localhost');
+
+      if (url.pathname === '/flaky-fix') {
+        flakyFixed = true;
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+
+      if (url.pathname === '/flaky' || url.pathname === '/flaky-2') {
+        if (!flakyFixed) {
+          const next = url.pathname === '/flaky' ? '/flaky-2' : '/flaky';
+          res.writeHead(302, { Location: next });
+          res.end();
+          return;
+        }
+        if (url.pathname === '/flaky-2') {
+          res.writeHead(302, { Location: '/flaky' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(layout('Flaky Page', '<h1>Flaky Page</h1><p>Recovered on retry.</p>'));
+        return;
+      }
 
       const asset = ASSETS[url.pathname];
       if (asset) {

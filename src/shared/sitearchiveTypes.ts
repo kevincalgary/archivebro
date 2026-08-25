@@ -250,6 +250,8 @@ export type CaptureJobState = 'preparing' | 'running' | 'paused' | 'finalizing' 
 
 export interface CaptureProgress {
   jobId: string;
+  /** Distinguishes a fresh/resumed crawl from a resume-only retry of a finished archive's failed pages. */
+  kind: 'capture' | 'retry';
   state: CaptureJobState;
   siteTitle: string;
   startUrl: string;

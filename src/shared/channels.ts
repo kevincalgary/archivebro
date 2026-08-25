@@ -66,6 +66,7 @@ export const Channels = {
   siteCapturePause: 'siteCapture:pause',
   siteCaptureResume: 'siteCapture:resume',
   siteCaptureCancel: 'siteCapture:cancel',
+  siteCaptureRetryFailed: 'siteCapture:retryFailed',
   siteArchiveOpen: 'siteArchive:open',
   siteArchiveOpenPath: 'siteArchive:openPath',
   siteArchiveRevealInFolder: 'siteArchive:revealInFolder',

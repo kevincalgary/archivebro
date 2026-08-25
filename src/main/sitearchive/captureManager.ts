@@ -2,16 +2,32 @@ import type { BrowserWindow, Session } from 'electron';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS } from '../../shared/sitearchiveTypes';
 import { CaptureCancelledError, CaptureJob } from './crawler';
+import { RetryCancelledError, RetryJob } from './retryFailedPages';
 import { isStagingDirLive, replayCheckpoint } from './captureJournal';
 import { logger } from '../util/logger';
 
 /**
- * Owns running capture jobs. Only one capture runs at a time -- crawling
- * renders real pages, so allowing several concurrently would multiply
- * resource use and hammer the target site.
+ * The minimal surface CaptureManager needs to run, report on, and control
+ * either a fresh/resumed crawl (CaptureJob) or a resume-only retry of a
+ * finished archive's failed pages (RetryJob) -- structurally, not by
+ * inheritance, so the two stay otherwise unrelated.
+ */
+interface Job {
+  readonly jobId: string;
+  onProgress(listener: (progress: CaptureProgress) => void): void;
+  pause(): void;
+  resume(): void;
+  cancel(): void;
+  run(): Promise<CaptureResult>;
+}
+
+/**
+ * Owns running capture jobs. Only one capture (or retry) runs at a time --
+ * crawling renders real pages, so allowing several concurrently would
+ * multiply resource use and hammer the target site.
  */
 export class CaptureManager {
-  private activeJob: CaptureJob | null = null;
+  private activeJob: Job | null = null;
   private listeners: Array<(progress: CaptureProgress) => void> = [];
 
   onProgress(listener: (progress: CaptureProgress) => void): void {
@@ -95,6 +111,51 @@ export class CaptureManager {
       resumed: false,
       pagesAlreadyCaptured: 0,
     });
+  }
+
+  /**
+   * Re-attempt just the failed pages recorded in an already-finished
+   * .sitearchive, instead of re-running the whole capture. See
+   * retryFailedPages.ts for what "just the failed pages" means and why
+   * the original archive is never at risk even if this fails partway
+   * through.
+   */
+  retryFailedPages(input: {
+    window: BrowserWindow;
+    session: Session;
+    archivePath: string;
+  }): { jobId: string; promise: Promise<CaptureResult | null> } {
+    if (this.activeJob) {
+      throw new Error('A capture is already running. Wait for it to finish or cancel it first.');
+    }
+
+    const job = new RetryJob(input.window, input.session, input.archivePath);
+    this.activeJob = job;
+    job.onProgress((progress) => {
+      for (const l of this.listeners) l(progress);
+    });
+
+    logger.info('sitearchive.retry_started', { jobId: job.jobId, archivePath: input.archivePath });
+
+    const promise = job
+      .run()
+      .then((result) => result)
+      .catch((err: unknown) => {
+        if (err instanceof RetryCancelledError) {
+          logger.info('sitearchive.retry_cancelled', { jobId: job.jobId });
+          return null;
+        }
+        logger.error('sitearchive.retry_failed', {
+          jobId: job.jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      })
+      .finally(() => {
+        this.activeJob = null;
+      });
+
+    return { jobId: job.jobId, promise };
   }
 
   private launch(

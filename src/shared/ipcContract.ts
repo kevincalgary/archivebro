@@ -120,6 +120,7 @@ export const IpcSchemas = {
   [Channels.siteCapturePause]: z.object({ jobId: nonEmptyString }),
   [Channels.siteCaptureResume]: z.object({ jobId: nonEmptyString }),
   [Channels.siteCaptureCancel]: z.object({ jobId: nonEmptyString }),
+  [Channels.siteCaptureRetryFailed]: z.object({ archivePath: nonEmptyString }),
   [Channels.siteArchiveOpen]: z.void(),
   [Channels.siteArchiveOpenPath]: z.object({ archivePath: nonEmptyString }),
   [Channels.siteArchiveRevealInFolder]: z.object({ archivePath: nonEmptyString }),

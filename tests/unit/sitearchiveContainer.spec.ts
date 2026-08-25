@@ -190,6 +190,39 @@ describe('SiteArchiveBuilder -> openSiteArchive round trip', () => {
   });
 });
 
+describe('SiteArchiveBuilder.restoreFromManifest (resume-only retry)', () => {
+  it('seeds pages, assets, routes and failures from a finished manifest, excluding the URLs being retried', async () => {
+    const out = path.join(tmp, 'ForRetry.sitearchive');
+    const { manifest } = await buildSampleArchive(out);
+    expect(manifest.failures).toHaveLength(1);
+    const failingUrl = manifest.failures[0]!.url;
+
+    const builder = new SiteArchiveBuilder(manifest.archiveId, '0.1.0');
+    await builder.init(tmp);
+    builder.restoreFromManifest(manifest, new Set([failingUrl]));
+
+    expect(builder.pageCount).toBe(manifest.pages.length);
+    expect(builder.assetCount).toBe(manifest.assets.length);
+    expect(builder.hasPageForNormalizedUrl(manifest.pages[0]!.normalizedUrl)).toBe(true);
+    // The failure being retried is excluded -- a successful retry won't
+    // re-add it, and a still-failing one adds its own fresh entry.
+    expect(builder.failureList).toHaveLength(0);
+    expect(builder.totalBytes).toBe(manifest.totalUncompressedBytes);
+  });
+
+  it('keeps failures that are not being retried', async () => {
+    const out = path.join(tmp, 'ForRetryKeep.sitearchive');
+    const { manifest } = await buildSampleArchive(out);
+    const builder = new SiteArchiveBuilder(manifest.archiveId, '0.1.0');
+    await builder.init(tmp);
+    // Retry an unrelated URL -- the real failure should survive untouched.
+    builder.restoreFromManifest(manifest, new Set(['https://example.com/not-the-failing-url']));
+
+    expect(builder.failureList).toHaveLength(1);
+    expect(builder.failureList[0]!.url).toBe(manifest.failures[0]!.url);
+  });
+});
+
 describe('Full-text search inside an opened archive', () => {
   it('matches the page whose extracted text contains the term, not other pages', async () => {
     const out = path.join(tmp, 'Searchable.sitearchive');

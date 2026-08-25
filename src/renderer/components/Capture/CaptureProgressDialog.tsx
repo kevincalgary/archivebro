@@ -73,13 +73,21 @@ export default function CaptureProgressDialog({
     <div className="dialog-overlay">
       <div className="dialog capture-progress-dialog" role="dialog" aria-label="Capture progress">
         <h2>
-          {progress.state === 'completed'
-            ? 'Capture complete'
-            : progress.state === 'failed'
-              ? 'Capture failed'
-              : progress.state === 'cancelled'
-                ? 'Capture cancelled'
-                : 'Capturing website…'}
+          {progress.kind === 'retry'
+            ? progress.state === 'completed'
+              ? 'Retry complete'
+              : progress.state === 'failed'
+                ? 'Retry failed'
+                : progress.state === 'cancelled'
+                  ? 'Retry cancelled'
+                  : 'Retrying failed pages…'
+            : progress.state === 'completed'
+              ? 'Capture complete'
+              : progress.state === 'failed'
+                ? 'Capture failed'
+                : progress.state === 'cancelled'
+                  ? 'Capture cancelled'
+                  : 'Capturing website…'}
         </h2>
 
         <div className="capture-target">
@@ -110,11 +118,13 @@ export default function CaptureProgressDialog({
                   ? 'Writing archive file'
                   : progress.state === 'paused'
                     ? 'Paused'
-                    : 'Capturing pages'
+                    : progress.kind === 'retry'
+                      ? 'Retrying pages'
+                      : 'Capturing pages'
               }
               detail={
                 showDeterminate
-                  ? `${progress.pagesCompleted} of ${progress.pagesDiscovered} found · ${formatDuration(elapsed)}`
+                  ? `${progress.pagesCompleted} of ${progress.pagesDiscovered} ${progress.kind === 'retry' ? 'retried' : 'found'} · ${formatDuration(elapsed)}`
                   : formatDuration(elapsed)
               }
               variant={progress.state === 'paused' ? 'warn' : 'default'}
@@ -124,11 +134,11 @@ export default function CaptureProgressDialog({
 
         <dl className="capture-stats">
           <div>
-            <dt>Pages discovered</dt>
+            <dt>{progress.kind === 'retry' ? 'Pages to retry' : 'Pages discovered'}</dt>
             <dd>{progress.pagesDiscovered}</dd>
           </div>
           <div>
-            <dt>Pages saved</dt>
+            <dt>{progress.kind === 'retry' ? 'Retried' : 'Pages saved'}</dt>
             <dd>{progress.pagesCompleted}</dd>
           </div>
           <div>
@@ -149,7 +159,13 @@ export default function CaptureProgressDialog({
           <div className="capture-current">
             {progress.state !== 'paused' && <Spinner size={11} className="capture-current-spinner" />}
             <span className="capture-current-label">
-              {progress.state === 'paused' ? 'Paused at' : progress.state === 'finalizing' ? 'Finalizing' : 'Now capturing'}
+              {progress.state === 'paused'
+                ? 'Paused at'
+                : progress.state === 'finalizing'
+                  ? 'Finalizing'
+                  : progress.kind === 'retry'
+                    ? 'Now retrying'
+                    : 'Now capturing'}
             </span>
             <span className="capture-current-url">{progress.currentUrl ?? '—'}</span>
           </div>

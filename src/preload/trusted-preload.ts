@@ -93,6 +93,8 @@ const api = {
     pause: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCapturePause, { jobId }),
     resume: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCaptureResume, { jobId }),
     cancel: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCaptureCancel, { jobId }),
+    retryFailed: (archivePath: string): Promise<{ started: boolean; jobId?: string }> =>
+      ipcRenderer.invoke(Channels.siteCaptureRetryFailed, { archivePath }),
   },
   captureRecovery: {
     list: (): Promise<RecoverableCaptureSummary[]> => ipcRenderer.invoke(Channels.captureRecoveryList),

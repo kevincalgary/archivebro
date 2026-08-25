@@ -42,6 +42,8 @@ export interface TestHooks {
   }) => Promise<{ jobId: string }>;
   /** Await the currently running capture, resolving null if it was cancelled. */
   awaitCapture: () => Promise<CaptureResult | null>;
+  /** Drive a resume-only retry of a finished archive's failed pages. */
+  retryFailedPages: (archivePath: string) => Promise<{ jobId: string }>;
   cancelCapture: () => boolean;
   pauseCapture: () => boolean;
   resumeCapture: () => boolean;
@@ -104,6 +106,18 @@ export function installTestHooks(
       return { jobId };
     },
     awaitCapture: async () => (capturePromise ? capturePromise : null),
+    retryFailedPages: async (archivePath: string) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) throw new Error('No window');
+      const { jobId, promise } = hooks.captureManager.retryFailedPages({
+        window: win,
+        session: session.fromPartition('persist:browsing'),
+        archivePath,
+      });
+      activeJobId = jobId;
+      capturePromise = promise.catch(() => null);
+      return { jobId };
+    },
     cancelCapture: () => (activeJobId ? hooks.captureManager.cancel(activeJobId) : false),
     pauseCapture: () => (activeJobId ? hooks.captureManager.pause(activeJobId) : false),
     resumeCapture: () => (activeJobId ? hooks.captureManager.resume(activeJobId) : false),

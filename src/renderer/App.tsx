@@ -358,14 +358,15 @@ export default function App() {
           onOpenArchive={(p) => void openArchivePath(p)}
           onRevealArchive={(p) => void window.archiveBrowser.siteArchive.revealInFolder(p)}
           onRetryFailed={async () => {
-            // Retrying re-runs a capture from the same starting point;
-            // pages that succeeded are re-fetched too, which keeps the
-            // resulting archive internally consistent rather than
-            // stitching two partial crawls together.
-            setCaptureProgress(null);
-            if (!activeTabId) return;
-            const info = await window.archiveBrowser.siteCapture.estimate(activeTabId);
-            setScopeDialog({ url: info.url, title: info.title, host: info.host });
+            // Resume-only retry: re-attempts exactly the recorded failures
+            // against the already-finished archive, rather than re-running
+            // the whole capture and re-fetching pages that already
+            // succeeded. Progress arrives through the same capture-progress
+            // event a fresh capture uses, so the dialog just keeps showing
+            // (with kind: 'retry' distinguishing the two in its title).
+            const archivePath = captureProgress?.result?.archivePath;
+            if (!archivePath) return;
+            await window.archiveBrowser.siteCapture.retryFailed(archivePath);
           }}
         />
       )}

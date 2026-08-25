@@ -40,7 +40,10 @@ export interface ResumeState {
   checkpoint: ReplayedCheckpoint;
 }
 
-const RESOURCE_TIMEOUT_MS = 20_000;
+// Exported: retryFailedPages.ts reuses these so a retried page is bound by
+// exactly the same per-page ceilings as a page captured during the
+// original crawl, rather than a second set of numbers that could drift.
+export const RESOURCE_TIMEOUT_MS = 20_000;
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
 /**
  * Per-resource ceiling.
@@ -53,16 +56,16 @@ const PAGE_LOAD_TIMEOUT_MS = 30_000;
  * and concurrency is reduced when media is enabled so the product stays
  * modest (96MB x 3 ~= 288MB worst case).
  */
-const MAX_RESOURCE_BYTES = 64 * 1024 * 1024;
-const MAX_RESOURCE_BYTES_WITH_MEDIA = 96 * 1024 * 1024;
+export const MAX_RESOURCE_BYTES = 64 * 1024 * 1024;
+export const MAX_RESOURCE_BYTES_WITH_MEDIA = 96 * 1024 * 1024;
 /**
  * Subresources of a single page fetched at once. Browsers routinely open
  * ~6 connections per host, so this is ordinary load, not aggressive --
  * and page-to-page politeness is still governed by scope.crawlDelayMs.
  */
-const ASSET_CONCURRENCY = 8;
+export const ASSET_CONCURRENCY = 8;
 /** Lower when media is on, since each in-flight response can be far larger. */
-const ASSET_CONCURRENCY_WITH_MEDIA = 3;
+export const ASSET_CONCURRENCY_WITH_MEDIA = 3;
 /** Rebuild the crawling view this often, to bound renderer memory growth. */
 const PAGES_PER_VIEW_RECYCLE = 20;
 const MAX_REDIRECTS_PER_PAGE = 10;
@@ -88,7 +91,7 @@ const MAX_CONSECUTIVE_SCREENSHOT_DEGRADATIONS = 3;
  * open forever. Two minutes is far above a normal page (~7s measured on a
  * large marketing site) and still lets a 50,000-page crawl make progress.
  */
-const PAGE_CAPTURE_BUDGET_MS = 120_000;
+export const PAGE_CAPTURE_BUDGET_MS = 120_000;
 /**
  * How long an idle worker waits before rechecking the queue.
  *
@@ -198,6 +201,7 @@ export class CaptureJob {
   private emit(): void {
     const progress: CaptureProgress = {
       jobId: this.jobId,
+      kind: 'capture',
       state: this.state,
       siteTitle: this.siteTitle,
       startUrl: this.startUrl,
@@ -215,6 +219,7 @@ export class CaptureJob {
   private emitTerminal(extra: Partial<CaptureProgress>): void {
     const progress: CaptureProgress = {
       jobId: this.jobId,
+      kind: 'capture',
       state: this.state,
       siteTitle: this.siteTitle,
       startUrl: this.startUrl,
@@ -672,7 +677,7 @@ export class CaptureJob {
     }
 
     try {
-      const loaded = await this.loadUrl(view.webContents, item.url);
+      const loaded = await loadUrl(view.webContents, item.url);
       if (!loaded.ok) {
         await this.recordFailure({
           url: item.url,
@@ -870,72 +875,77 @@ export class CaptureJob {
     this.emit();
   }
 
-  /**
-   * Navigate the hidden view, with a hard timeout and redirect-loop
-   * detection. Resolves with ok:false rather than throwing so one bad page
-   * never aborts the whole crawl.
-   */
-  private loadUrl(
-    webContents: Electron.WebContents,
-    url: string,
-  ): Promise<{ ok: true } | { ok: false; kind: CaptureFailureEntry['kind']; message: string }> {
-    return new Promise((resolve) => {
-      let settled = false;
-      let redirects = 0;
-      const seenRedirects = new Set<string>();
+}
 
-      const cleanup = () => {
-        clearTimeout(timer);
-        webContents.removeListener('did-finish-load', onFinish);
-        webContents.removeListener('did-fail-load', onFail);
-        webContents.removeListener('did-redirect-navigation', onRedirect);
-      };
-      const finish = (value: { ok: true } | { ok: false; kind: CaptureFailureEntry['kind']; message: string }) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      };
+/**
+ * Navigate a hidden view, with a hard timeout and redirect-loop detection.
+ * Resolves with ok:false rather than throwing so one bad page never aborts
+ * a whole crawl (or retry pass).
+ *
+ * Exported (not a CaptureJob method) so retryFailedPages.ts can reuse the
+ * exact same navigation/timeout/redirect-loop handling instead of a second
+ * implementation that could drift from this one.
+ */
+export function loadUrl(
+  webContents: Electron.WebContents,
+  url: string,
+): Promise<{ ok: true } | { ok: false; kind: CaptureFailureEntry['kind']; message: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let redirects = 0;
+    const seenRedirects = new Set<string>();
 
-      const timer = setTimeout(() => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      webContents.removeListener('did-finish-load', onFinish);
+      webContents.removeListener('did-fail-load', onFail);
+      webContents.removeListener('did-redirect-navigation', onRedirect);
+    };
+    const finish = (value: { ok: true } | { ok: false; kind: CaptureFailureEntry['kind']; message: string }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        webContents.stop();
+      } catch {
+        /* ignore */
+      }
+      finish({ ok: false, kind: 'timeout', message: 'Page load timed out' });
+    }, PAGE_LOAD_TIMEOUT_MS);
+
+    const onFinish = () => finish({ ok: true });
+    const onFail = (_e: unknown, errorCode: number, description: string, _u: string, isMainFrame: boolean) => {
+      if (!isMainFrame) return;
+      if (errorCode === -3) return; // ERR_ABORTED, e.g. a redirect superseding
+      finish({ ok: false, kind: 'fetch-failed', message: `${description} (${errorCode})` });
+    };
+    const onRedirect = (_e: unknown, redirectUrl: string) => {
+      redirects += 1;
+      const norm = normalizeUrl(redirectUrl) ?? redirectUrl;
+      if (seenRedirects.has(norm) || redirects > MAX_REDIRECTS_PER_PAGE) {
         try {
           webContents.stop();
         } catch {
           /* ignore */
         }
-        finish({ ok: false, kind: 'timeout', message: 'Page load timed out' });
-      }, PAGE_LOAD_TIMEOUT_MS);
+        finish({ ok: false, kind: 'redirect-loop', message: 'Redirect loop detected' });
+        return;
+      }
+      seenRedirects.add(norm);
+    };
 
-      const onFinish = () => finish({ ok: true });
-      const onFail = (_e: unknown, errorCode: number, description: string, _u: string, isMainFrame: boolean) => {
-        if (!isMainFrame) return;
-        if (errorCode === -3) return; // ERR_ABORTED, e.g. a redirect superseding
-        finish({ ok: false, kind: 'fetch-failed', message: `${description} (${errorCode})` });
-      };
-      const onRedirect = (_e: unknown, redirectUrl: string) => {
-        redirects += 1;
-        const norm = normalizeUrl(redirectUrl) ?? redirectUrl;
-        if (seenRedirects.has(norm) || redirects > MAX_REDIRECTS_PER_PAGE) {
-          try {
-            webContents.stop();
-          } catch {
-            /* ignore */
-          }
-          finish({ ok: false, kind: 'redirect-loop', message: 'Redirect loop detected' });
-          return;
-        }
-        seenRedirects.add(norm);
-      };
+    webContents.on('did-finish-load', onFinish);
+    webContents.on('did-fail-load', onFail);
+    webContents.on('did-redirect-navigation', onRedirect);
 
-      webContents.on('did-finish-load', onFinish);
-      webContents.on('did-fail-load', onFail);
-      webContents.on('did-redirect-navigation', onRedirect);
-
-      webContents.loadURL(url).catch((err: unknown) => {
-        finish({ ok: false, kind: 'fetch-failed', message: describe(err) });
-      });
+    webContents.loadURL(url).catch((err: unknown) => {
+      finish({ ok: false, kind: 'fetch-failed', message: describe(err) });
     });
-  }
+  });
 }
 
 export class CaptureCancelledError extends Error {

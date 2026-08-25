@@ -78,6 +78,11 @@ export function siteHooks(app: ElectronApplication) {
       ),
     awaitCapture: (): Promise<CaptureResult | null> =>
       app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.awaitCapture()),
+    retryFailedPages: (archivePath: string): Promise<{ jobId: string }> =>
+      app.evaluate(
+        ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.retryFailedPages(p),
+        archivePath,
+      ),
     cancelCapture: (): Promise<boolean> =>
       app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.cancelCapture()),
     pauseCapture: (): Promise<boolean> =>

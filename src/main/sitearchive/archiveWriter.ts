@@ -474,6 +474,38 @@ export class SiteArchiveBuilder {
     this.totalUncompressed = checkpoint.totalUncompressed;
   }
 
+  /**
+   * Rehydrate from an already-finalized .sitearchive's manifest, for
+   * retryFailedPages.ts. Unlike restore() (mid-crawl, from a journal),
+   * this seeds a builder with a *complete, already-zipped* archive's
+   * contents so only the previously-failed pages need to be attempted
+   * again -- everything else is kept exactly as it was.
+   *
+   * `retryingUrls` are excluded from the restored failure list: a
+   * successful retry never re-adds them, and a still-failing retry adds
+   * its own fresh failure entry, so keeping the old one around would just
+   * leave a stale duplicate.
+   */
+  restoreFromManifest(manifest: SiteArchiveManifest, retryingUrls: ReadonlySet<string>): void {
+    this.pages = [...manifest.pages];
+    this.pageNormalizedUrls = new Set(manifest.pages.map((p) => p.normalizedUrl));
+    this.assets = new Map(manifest.assets.map((a) => [a.sha256, a]));
+    this.responses = new Map(manifest.responses.map((r) => [r.sha256, r]));
+    this.routes = new Map(manifest.routes.map((r) => [r.normalizedUrl, r]));
+    this.failures = manifest.failures.filter((f) => !retryingUrls.has(f.url));
+    this.failureCountsByKind = new Map();
+    for (const f of this.failures) {
+      this.failureCountsByKind.set(f.kind, (this.failureCountsByKind.get(f.kind) ?? 0) + 1);
+    }
+    // Bytes already on disk for the content being carried over unchanged --
+    // copyExistingEntriesIntoStaging() (retryFailedPages.ts) writes those
+    // same bytes into the new staging tree directly, not through
+    // addPage()/addAsset(), so this is the one place that accounts for
+    // them. Only genuinely new bytes from a successful retry add on top,
+    // through the normal addPage()/addAsset() codepath.
+    this.totalUncompressed = manifest.totalUncompressedBytes;
+  }
+
   private requireStaging(): string {
     if (!this.stagingDir) throw new Error('SiteArchiveBuilder.init() was not called');
     return this.stagingDir;

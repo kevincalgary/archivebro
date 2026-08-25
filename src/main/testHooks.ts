@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { app, session, BrowserWindow } from 'electron';
+import { app, session } from 'electron';
 import type { ArchiveRepo } from './db/archiveRepo';
 import type { SettingsStore } from './settings/settingsStore';
 import type { TabManager } from './browser/tabManager';
@@ -11,6 +11,7 @@ import { openSiteArchive } from './sitearchive/archiveReader';
 import { registerOpenedArchive, getSiteArchiveSession } from './sitearchive/sitearchiveSession';
 import { discardRecoveredCapture, finalizeRecoveredCapture, listRecoverableCaptures } from './sitearchive/archiveWriter';
 import { exportLibrary, importLibrary, type LibraryImportResult } from './library/libraryTransfer';
+import { getFocusedEntry, findEntryForTab } from './windows/windowRegistry';
 
 /**
  * A narrow, explicit back door for end-to-end tests. Playwright's Electron
@@ -33,8 +34,11 @@ import { exportLibrary, importLibrary, type LibraryImportResult } from './librar
 export interface TestHooks {
   archiveRepo: ArchiveRepo;
   settings: SettingsStore;
+  /** The focused (or most-recently-opened) window's TabManager -- see createWindowForTesting for multi-window tests. */
   tabManager: TabManager;
   captureManager: CaptureManager;
+  /** Opens a genuine second (third, ...) app window, the same way File > New Window does. */
+  createWindowForTesting: () => void;
   /** Drive a .sitearchive capture without going through the save dialog. */
   captureSiteToPath: (input: {
     tabId: string;
@@ -79,7 +83,7 @@ declare global {
 }
 
 export function installTestHooks(
-  hooks: Pick<TestHooks, 'archiveRepo' | 'settings' | 'tabManager' | 'captureManager'>,
+  hooks: Pick<TestHooks, 'archiveRepo' | 'settings' | 'captureManager' | 'createWindowForTesting'>,
 ): void {
   if (process.env.ARCHIVE_BROWSER_E2E !== '1') return;
 
@@ -92,15 +96,27 @@ export function installTestHooks(
     lastProgress = p;
   });
 
+  function focusedTabManager(): TabManager {
+    const entry = getFocusedEntry();
+    if (!entry) throw new Error('No window');
+    return entry.tabManager;
+  }
+
   globalThis.__ARCHIVE_BROWSER_TEST_HOOKS__ = {
     ...hooks,
+    get tabManager() {
+      return focusedTabManager();
+    },
     captureSiteToPath: async ({ tabId, scope, outputPath }) => {
-      const tab = hooks.tabManager.getTabInfo(tabId);
+      // Resolved by which window actually owns tabId, not "the focused
+      // window" -- a real capture click is scoped this way inherently (it's
+      // an IPC call from that tab's own window), and window-focus tracking
+      // isn't reliably observable from outside the app the way this test
+      // hook is used (e.g. Playwright's bringToFront() doesn't necessarily
+      // change what Electron's own BrowserWindow.isFocused() reports).
+      const tab = findEntryForTab(tabId)?.tabManager.getTabInfo(tabId);
       if (!tab) throw new Error('Tab not found');
-      const win = BrowserWindow.getAllWindows()[0];
-      if (!win) throw new Error('No window');
       const { jobId, promise } = await hooks.captureManager.start({
-        window: win,
         session: session.fromPartition('persist:browsing'),
         startUrl: tab.url,
         scope,
@@ -112,10 +128,7 @@ export function installTestHooks(
     },
     awaitCapture: async () => (capturePromise ? capturePromise : null),
     retryFailedPages: async (archivePath: string) => {
-      const win = BrowserWindow.getAllWindows()[0];
-      if (!win) throw new Error('No window');
       const { jobId, promise } = hooks.captureManager.retryFailedPages({
-        window: win,
         session: session.fromPartition('persist:browsing'),
         archivePath,
       });
@@ -132,13 +145,12 @@ export function installTestHooks(
       registerOpenedArchive(archive);
       const entryPageId = archive.entryPageId;
       if (!entryPageId) throw new Error('Archive has no pages');
-      const tabId = hooks.tabManager.openSiteArchiveTab(
-        archive.manifest.archiveId,
-        entryPageId,
-        getSiteArchiveSession(),
-        { siteTitle: archive.manifest.siteTitle, archivePath },
-      );
-      hooks.tabManager.activateTab(tabId);
+      const tabManager = focusedTabManager();
+      const tabId = tabManager.openSiteArchiveTab(archive.manifest.archiveId, entryPageId, getSiteArchiveSession(), {
+        siteTitle: archive.manifest.siteTitle,
+        archivePath,
+      });
+      tabManager.activateTab(tabId);
       return tabId;
     },
     readArchiveText: async (archiveId: string) => {
@@ -182,10 +194,7 @@ export function installTestHooks(
       finalizeRecoveredCapture(stagingDir, app.getVersion()),
     discardRecoveredCapture: (stagingDir: string) => discardRecoveredCapture(stagingDir),
     resumeInterruptedCapture: async (stagingDir: string) => {
-      const win = BrowserWindow.getAllWindows()[0];
-      if (!win) throw new Error('No window');
       const started = await hooks.captureManager.resumeInterrupted({
-        window: win,
         session: session.fromPartition('persist:browsing'),
         stagingDir,
       });

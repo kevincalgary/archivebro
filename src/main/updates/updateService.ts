@@ -1,9 +1,10 @@
-import { app, type BrowserWindow } from 'electron';
+import { app } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { SettingsStore } from '../settings/settingsStore';
 import { Channels } from '../../shared/ipcContract';
 import { logger } from '../util/logger';
 import type { UpdateStatus } from '../../shared/types';
+import { broadcast } from '../windows/windowRegistry';
 
 // Give startup (tab restore, the interrupted-capture recovery prompt) a
 // moment to settle before adding a network request of our own.
@@ -40,10 +41,7 @@ export class UpdateService {
   private initialTimer: ReturnType<typeof setTimeout> | null = null;
   private interval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(
-    private mainWindow: BrowserWindow,
-    private settings: SettingsStore,
-  ) {
+  constructor(private settings: SettingsStore) {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = false;
 
@@ -118,8 +116,6 @@ export class UpdateService {
 
   private setStatus(patch: Partial<UpdateStatus>): void {
     this.status = { ...this.status, ...patch, checkedAt: new Date().toISOString() };
-    if (!this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send(Channels.onUpdateStatus, this.status);
-    }
+    broadcast((window) => window.webContents.send(Channels.onUpdateStatus, this.status));
   }
 }

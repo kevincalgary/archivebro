@@ -1,31 +1,39 @@
-import { Menu, type BrowserWindow, type MenuItemConstructorOptions } from 'electron';
+import { Menu, type MenuItemConstructorOptions } from 'electron';
 import type { TabManager } from '../browser/tabManager';
 import { Channels } from '../../shared/ipcContract';
+import { getFocusedEntry } from './windowRegistry';
 
 /**
  * Standard browser shortcuts, mapped through Electron's 'CmdOrCtrl' /
  * 'CmdOrCtrl+Shift' accelerators so macOS gets Cmd and Windows gets Ctrl
  * automatically. Actions that operate on browser/tab state go straight to
- * TabManager; actions that are purely a renderer UI concern (focusing the
- * address bar, switching screens) are pushed to the renderer as a
- * 'events:menuAction' message for the React UI to handle.
+ * the focused window's TabManager; actions that are purely a renderer UI
+ * concern (focusing the address bar, switching screens) are pushed to that
+ * window's renderer as a 'events:menuAction' message for the React UI to
+ * handle. Built once for the whole app -- Electron's application menu is
+ * process-global, not per-window -- so every click resolves "the window
+ * this should act on" at click time rather than closing over one fixed
+ * window/TabManager from when the menu was built.
  */
-export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager, checkForUpdates?: () => void): void {
-  const send = (action: string) => mainWindow.webContents.send(Channels.onMenuAction, action);
-  const activeTabId = () => tabManager.getActiveTabId();
+export function buildAppMenu(createWindow: () => void, checkForUpdates?: () => void): void {
+  const send = (action: string) => getFocusedEntry()?.window.webContents.send(Channels.onMenuAction, action);
+  /** Runs fn against the focused window's TabManager and its active tab id, if both exist. */
+  const withActiveTab = (fn: (tabManager: TabManager, tabId: string) => void) => {
+    const entry = getFocusedEntry();
+    const id = entry?.tabManager.getActiveTabId();
+    if (entry && id) fn(entry.tabManager, id);
+  };
 
   const fileMenu: MenuItemConstructorOptions = {
     label: 'File',
     submenu: [
+      { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
       { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: () => send('new-tab') },
       { label: 'New Private Tab', accelerator: 'CmdOrCtrl+Shift+N', click: () => send('new-private-tab') },
       {
         label: 'Close Tab',
         accelerator: 'CmdOrCtrl+W',
-        click: () => {
-          const id = activeTabId();
-          if (id) send(`close-tab:${id}`);
-        },
+        click: () => withActiveTab((_tabManager, id) => send(`close-tab:${id}`)),
       },
       { type: 'separator' },
       { label: 'Capture the Page…', accelerator: 'CmdOrCtrl+Shift+S', click: () => send('capture-page') },
@@ -56,18 +64,12 @@ export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager, 
       {
         label: 'Reload',
         accelerator: 'CmdOrCtrl+R',
-        click: () => {
-          const id = activeTabId();
-          if (id) tabManager.reload(id);
-        },
+        click: () => withActiveTab((tabManager, id) => tabManager.reload(id)),
       },
       {
         label: 'Stop',
         accelerator: 'Esc',
-        click: () => {
-          const id = activeTabId();
-          if (id) tabManager.stop(id);
-        },
+        click: () => withActiveTab((tabManager, id) => tabManager.stop(id)),
       },
       { label: 'Focus Address Bar', accelerator: 'CmdOrCtrl+L', click: () => send('focus-address-bar') },
       { type: 'separator' },
@@ -89,18 +91,12 @@ export function buildAppMenu(mainWindow: BrowserWindow, tabManager: TabManager, 
       {
         label: 'Back',
         accelerator: 'CmdOrCtrl+[',
-        click: () => {
-          const id = activeTabId();
-          if (id) tabManager.goBack(id);
-        },
+        click: () => withActiveTab((tabManager, id) => tabManager.goBack(id)),
       },
       {
         label: 'Forward',
         accelerator: 'CmdOrCtrl+]',
-        click: () => {
-          const id = activeTabId();
-          if (id) tabManager.goForward(id);
-        },
+        click: () => withActiveTab((tabManager, id) => tabManager.goForward(id)),
       },
     ],
   };

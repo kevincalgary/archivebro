@@ -210,7 +210,31 @@ export function testHooks(app: ElectronApplication) {
         ({}, p: string) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.importLibraryFromPath(p),
         zipPath,
       ),
+    createWindowForTesting: (): Promise<void> =>
+      app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.createWindowForTesting()),
   };
+}
+
+/**
+ * Waits for a trusted chrome window Page other than any already known
+ * (e.g. after createWindowForTesting()). Needed because
+ * ElectronApplication.windows() enumerates every page-type CDP target,
+ * including each tab's WebContentsView -- see findTrustedWindow's doc
+ * comment above for why a URL check against renderer/index.html is what
+ * distinguishes chrome windows from everything else.
+ */
+export async function waitForAnotherTrustedWindow(app: ElectronApplication, known: Page[]): Promise<Page> {
+  const isTrusted = (w: Page) => {
+    const url = w.url();
+    return url.includes('renderer/index.html') || url.includes('localhost:5173');
+  };
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const match = app.windows().find((w) => isTrusted(w) && !known.includes(w));
+    if (match) return match;
+    if (Date.now() > deadline) throw new Error('Timed out waiting for another trusted chrome window to appear');
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 export async function waitForArchiveCount(

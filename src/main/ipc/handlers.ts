@@ -1,9 +1,10 @@
-import { app, ipcMain, dialog, shell, session, type IpcMainInvokeEvent, type BrowserWindow } from 'electron';
+import { app, ipcMain, dialog, shell, session, BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { z } from 'zod';
 import { promises as fs, existsSync } from 'node:fs';
 import { Channels, IpcSchemas } from '../../shared/ipcContract';
 import type { TabManager } from '../browser/tabManager';
 import type { SettingsStore } from '../settings/settingsStore';
+import { getEntry, getFocusedEntry, isTrustedSenderId } from '../windows/windowRegistry';
 import type { ArchiveRepo } from '../db/archiveRepo';
 import { archiveDirFor, archiveFilePaths } from '../util/paths';
 import { getOfflineSession } from '../offline/offlineSession';
@@ -31,8 +32,6 @@ import path from 'node:path';
 import type { UpdateService } from '../updates/updateService';
 
 interface Deps {
-  mainWindow: BrowserWindow;
-  tabManager: TabManager;
   settings: SettingsStore;
   archiveRepo: ArchiveRepo;
   captureManager: CaptureManager;
@@ -42,24 +41,35 @@ interface Deps {
 /**
  * Every handler below is registered for exactly one validated channel.
  * Two checks run before any handler body executes:
- *   1. `event.senderFrame` must belong to the trusted main window's own
+ *   1. `event.sender` must be a registered trusted chrome window's own
  *      webContents -- a browsing or offline WebContentsView can never
  *      reach these handlers because they're never given a preload script
  *      that calls ipcRenderer in the first place, but this is
- *      defense-in-depth in case that ever changes.
+ *      defense-in-depth in case that ever changes. With multiple windows,
+ *      any of them qualifies -- see windowRegistry.isTrustedSenderId.
  *   2. The arguments are parsed against the channel's zod schema from
  *      ipcContract.ts; malformed calls are rejected before touching disk,
  *      a session, or a webContents.
  */
 export function registerIpcHandlers(deps: Deps): void {
-  const { mainWindow, tabManager, settings, archiveRepo, captureManager, updateService } = deps;
+  const { settings, archiveRepo, captureManager, updateService } = deps;
+
+  /** The window that made this call -- safe: only ever a trusted chrome window's own webContents, never a tab's. */
+  function windowFor(event: IpcMainInvokeEvent): BrowserWindow {
+    return BrowserWindow.fromWebContents(event.sender) ?? getFocusedEntry()!.window;
+  }
+
+  /** The TabManager owning the window that made this call. */
+  function tabManagerFor(event: IpcMainInvokeEvent): TabManager {
+    return getEntry(BrowserWindow.fromWebContents(event.sender)?.id)?.tabManager ?? getFocusedEntry()!.tabManager;
+  }
 
   function handle<C extends keyof typeof IpcSchemas>(
     channel: C,
     fn: (args: z.infer<(typeof IpcSchemas)[C]>, event: IpcMainInvokeEvent) => unknown,
   ): void {
     ipcMain.handle(channel, (event, rawArgs) => {
-      if (event.sender.id !== mainWindow.webContents.id) {
+      if (!isTrustedSenderId(event.sender.id)) {
         logger.error('ipc.rejected_untrusted_sender', { channel });
         throw new Error('Untrusted IPC sender');
       }
@@ -74,18 +84,20 @@ export function registerIpcHandlers(deps: Deps): void {
   }
 
   // --- Tabs ---
-  handle(Channels.tabsCreate, (args) => tabManager.createTab(args.url, false));
-  handle(Channels.tabsCreatePrivate, (args) => tabManager.createTab(args.url, true));
-  handle(Channels.tabsClose, (args) => tabManager.closeTab(args.tabId));
-  handle(Channels.tabsActivate, (args) => tabManager.activateTab(args.tabId));
-  handle(Channels.tabsList, () => tabManager.list());
-  handle(Channels.tabsNavigate, (args) => tabManager.navigate(args.tabId, args.input));
-  handle(Channels.tabsGoBack, (args) => tabManager.goBack(args.tabId));
-  handle(Channels.tabsGoForward, (args) => tabManager.goForward(args.tabId));
-  handle(Channels.tabsReload, (args) => tabManager.reload(args.tabId));
-  handle(Channels.tabsStop, (args) => tabManager.stop(args.tabId));
-  handle(Channels.tabsSetBounds, (args) => tabManager.setContentBounds(args));
-  handle(Channels.tabsToggleArchivePaused, (args) => tabManager.setArchivingPaused(args.tabId, args.paused));
+  handle(Channels.tabsCreate, (args, event) => tabManagerFor(event).createTab(args.url, false));
+  handle(Channels.tabsCreatePrivate, (args, event) => tabManagerFor(event).createTab(args.url, true));
+  handle(Channels.tabsClose, (args, event) => tabManagerFor(event).closeTab(args.tabId));
+  handle(Channels.tabsActivate, (args, event) => tabManagerFor(event).activateTab(args.tabId));
+  handle(Channels.tabsList, (_args, event) => tabManagerFor(event).list());
+  handle(Channels.tabsNavigate, (args, event) => tabManagerFor(event).navigate(args.tabId, args.input));
+  handle(Channels.tabsGoBack, (args, event) => tabManagerFor(event).goBack(args.tabId));
+  handle(Channels.tabsGoForward, (args, event) => tabManagerFor(event).goForward(args.tabId));
+  handle(Channels.tabsReload, (args, event) => tabManagerFor(event).reload(args.tabId));
+  handle(Channels.tabsStop, (args, event) => tabManagerFor(event).stop(args.tabId));
+  handle(Channels.tabsSetBounds, (args, event) => tabManagerFor(event).setContentBounds(args));
+  handle(Channels.tabsToggleArchivePaused, (args, event) =>
+    tabManagerFor(event).setArchivingPaused(args.tabId, args.paused),
+  );
 
   // --- Library ---
   handle(Channels.libraryQuery, (args) => archiveRepo.query(args));
@@ -113,10 +125,10 @@ export function registerIpcHandlers(deps: Deps): void {
     return { deletedCount: ids.length };
   });
 
-  handle(Channels.libraryExport, async (args) => {
+  handle(Channels.libraryExport, async (args, event) => {
     const detail = archiveRepo.getById(args.archiveId);
     if (!detail) throw new Error('Archive not found');
-    const result = await dialog.showSaveDialog(mainWindow, {
+    const result = await dialog.showSaveDialog(windowFor(event), {
       defaultPath: `${sanitizeFilename(detail.title || detail.domain)}-${args.archiveId.slice(0, 8)}.zip`,
       filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
     });
@@ -132,21 +144,23 @@ export function registerIpcHandlers(deps: Deps): void {
     return { dir };
   });
 
-  handle(Channels.libraryOpenOffline, async (args) => {
+  handle(Channels.libraryOpenOffline, async (args, event) => {
     const detail = archiveRepo.getById(args.archiveId);
     if (!detail) throw new Error('Archive not found');
     const offlineSession = getOfflineSession(() => settings.get().archiveStorageDir, expectedHashLookup(archiveRepo));
     const mhtmlPath = archiveFilePaths(settings.get().archiveStorageDir, args.archiveId).mhtml;
     const mhtmlVerified = await verifyMhtmlIntegrity(detail.hasMhtml, mhtmlPath, detail.mhtmlSha256, args.archiveId);
     const integrityFailed = detail.hasMhtml && !mhtmlVerified;
+    const tabManager = tabManagerFor(event);
     const tabId = tabManager.openOfflineTab(args.archiveId, offlineSession, mhtmlVerified, mhtmlPath, integrityFailed);
     tabManager.activateTab(tabId);
     return tabId;
   });
 
-  handle(Channels.libraryOpenLive, (args) => {
+  handle(Channels.libraryOpenLive, (args, event) => {
     const detail = archiveRepo.getById(args.archiveId);
     if (!detail) throw new Error('Archive not found');
+    const tabManager = tabManagerFor(event);
     const tabId = tabManager.createTab(detail.finalUrl, false);
     tabManager.activateTab(tabId);
     return tabId;
@@ -156,8 +170,8 @@ export function registerIpcHandlers(deps: Deps): void {
     return archiveRepo.findMostRecentByCanonicalUrl(canonicalizeUrl(args.url));
   });
 
-  handle(Channels.libraryExportAll, async () => {
-    const result = await dialog.showSaveDialog(mainWindow, {
+  handle(Channels.libraryExportAll, async (_args, event) => {
+    const result = await dialog.showSaveDialog(windowFor(event), {
       title: 'Export Whole Library',
       defaultPath: `archive-browser-library-${new Date().toISOString().slice(0, 10)}.zip`,
       filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
@@ -173,8 +187,8 @@ export function registerIpcHandlers(deps: Deps): void {
     return { exported: true as const, path: result.filePath, archiveCount };
   });
 
-  handle(Channels.libraryImportAll, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+  handle(Channels.libraryImportAll, async (_args, event) => {
+    const result = await dialog.showOpenDialog(windowFor(event), {
       title: 'Import Whole Library',
       properties: ['openFile'],
       filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
@@ -203,8 +217,8 @@ export function registerIpcHandlers(deps: Deps): void {
     setDiagnosticLogging(next.diagnosticLogging);
     return next;
   });
-  handle(Channels.settingsPickStorageDir, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
+  handle(Channels.settingsPickStorageDir, async (_args, event) => {
+    const result = await dialog.showOpenDialog(windowFor(event), { properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || result.filePaths.length === 0) return null;
     const newDir = result.filePaths[0];
     if (!newDir) return null;
@@ -228,8 +242,8 @@ export function registerIpcHandlers(deps: Deps): void {
       }
     }
   });
-  handle(Channels.settingsExport, async () => {
-    const result = await dialog.showSaveDialog(mainWindow, {
+  handle(Channels.settingsExport, async (_args, event) => {
+    const result = await dialog.showSaveDialog(windowFor(event), {
       defaultPath: 'archive-browser-settings.json',
       filters: [{ name: 'JSON', extensions: ['json'] }],
     });
@@ -237,8 +251,8 @@ export function registerIpcHandlers(deps: Deps): void {
     await fs.writeFile(result.filePath, JSON.stringify(settings.get(), null, 2), 'utf8');
     return { exported: true };
   });
-  handle(Channels.settingsImport, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+  handle(Channels.settingsImport, async (_args, event) => {
+    const result = await dialog.showOpenDialog(windowFor(event), {
       properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }],
     });
@@ -280,15 +294,35 @@ export function registerIpcHandlers(deps: Deps): void {
     return { resolved };
   });
 
-  handle(Channels.downloadsChooseSavePath, async (args) => {
-    const result = await dialog.showSaveDialog(mainWindow, { defaultPath: args.suggestedName });
+  handle(Channels.downloadsChooseSavePath, async (args, event) => {
+    const result = await dialog.showSaveDialog(windowFor(event), { defaultPath: args.suggestedName });
     return result.canceled ? null : result.filePath;
   });
 
   // --- Portable .sitearchive capture ---
 
-  handle(Channels.siteCaptureEstimate, (args) => {
-    const tab = tabManager.getTabInfo(args.tabId);
+  // Which window started each running capture, so progress events (below)
+  // reach only that window rather than every open one. Captures themselves
+  // run on the hidden capture-host window (see captureManager.ts) and are
+  // unaffected by any chrome window closing, including the one that started
+  // them -- this is purely about where the progress dialog shows up.
+  const jobWindowId = new Map<string, number>();
+  captureManager.onProgress((progress) => {
+    // Falls back to the focused window when a job has no recorded starter
+    // -- e.g. a capture driven directly through the e2e test hooks, which
+    // bypass siteCaptureStart entirely -- so progress is never silently
+    // dropped; it just isn't precisely targeted in that case.
+    const entry = getEntry(jobWindowId.get(progress.jobId)) ?? getFocusedEntry();
+    if (entry && !entry.window.isDestroyed()) {
+      entry.window.webContents.send(Channels.onSiteCaptureProgress, progress);
+    }
+    if (progress.state === 'completed' || progress.state === 'failed' || progress.state === 'cancelled') {
+      jobWindowId.delete(progress.jobId);
+    }
+  });
+
+  handle(Channels.siteCaptureEstimate, (args, event) => {
+    const tab = tabManagerFor(event).getTabInfo(args.tabId);
     if (!tab) throw new Error('Tab not found');
     return {
       url: tab.url,
@@ -305,14 +339,14 @@ export function registerIpcHandlers(deps: Deps): void {
     };
   });
 
-  handle(Channels.siteCaptureStart, async (args) => {
-    const tab = tabManager.getTabInfo(args.tabId);
+  handle(Channels.siteCaptureStart, async (args, event) => {
+    const tab = tabManagerFor(event).getTabInfo(args.tabId);
     if (!tab) throw new Error('Tab not found');
     if (!/^https?:/i.test(tab.url)) throw new Error('Only http(s) pages can be captured');
     if (captureManager.isBusy) throw new Error('A capture is already running');
 
     const suggested = suggestArchiveFilename(tab.url, tab.title);
-    const saveResult = await dialog.showSaveDialog(mainWindow, {
+    const saveResult = await dialog.showSaveDialog(windowFor(event), {
       title: 'Save Website Archive',
       defaultPath: suggested,
       filters: [{ name: 'Website Archive', extensions: [SITEARCHIVE_EXTENSION] }],
@@ -325,12 +359,12 @@ export function registerIpcHandlers(deps: Deps): void {
     }
 
     const { jobId, promise } = await captureManager.start({
-      window: mainWindow,
       session: session.fromPartition('persist:browsing'),
       startUrl: tab.url,
       scope: args.scope,
       outputPath,
     });
+    jobWindowId.set(jobId, windowFor(event).id);
 
     // The promise settles asynchronously; progress (including the final
     // completed/failed/cancelled state) reaches the renderer via the
@@ -346,13 +380,13 @@ export function registerIpcHandlers(deps: Deps): void {
   handle(Channels.siteCaptureResume, (args) => ({ ok: captureManager.resume(args.jobId) }));
   handle(Channels.siteCaptureCancel, (args) => ({ ok: captureManager.cancel(args.jobId) }));
 
-  handle(Channels.siteCaptureRetryFailed, (args) => {
+  handle(Channels.siteCaptureRetryFailed, (args, event) => {
     if (captureManager.isBusy) return { started: false };
     const { jobId, promise } = captureManager.retryFailedPages({
-      window: mainWindow,
       session: session.fromPartition('persist:browsing'),
       archivePath: args.archivePath,
     });
+    jobWindowId.set(jobId, windowFor(event).id);
     // Progress (including completion) reaches the renderer through the
     // same capture progress event a fresh capture uses -- see
     // siteCaptureStart above.
@@ -368,15 +402,15 @@ export function registerIpcHandlers(deps: Deps): void {
 
   handle(Channels.captureRecoveryList, () => listRecoverableCapturesSummary(app.getPath('temp')));
 
-  handle(Channels.captureRecoveryResume, async (args) => {
+  handle(Channels.captureRecoveryResume, async (args, event) => {
     if (captureManager.isBusy) return { ok: false };
     const stagingDir = SiteArchiveBuilder.stagingDirFor(app.getPath('temp'), args.archiveId);
     const started = await captureManager.resumeInterrupted({
-      window: mainWindow,
       session: session.fromPartition('persist:browsing'),
       stagingDir,
     });
     if (!started) return { ok: false };
+    jobWindowId.set(started.jobId, windowFor(event).id);
     // Progress (including completion) reaches the renderer through the
     // same capture progress event a fresh capture uses, so nothing further
     // is awaited here -- see siteCaptureStart above.
@@ -384,7 +418,7 @@ export function registerIpcHandlers(deps: Deps): void {
     return { ok: true, jobId: started.jobId };
   });
 
-  handle(Channels.captureRecoveryFinish, async (args) => {
+  handle(Channels.captureRecoveryFinish, async (args, event) => {
     const stagingDir = SiteArchiveBuilder.stagingDirFor(app.getPath('temp'), args.archiveId);
     const finished = await finalizeRecoveredCapture(stagingDir, app.getVersion());
     if (!finished) return { ok: false };
@@ -416,7 +450,8 @@ export function registerIpcHandlers(deps: Deps): void {
         failures: finished.failures,
       },
     };
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onSiteCaptureProgress, progress);
+    const window = windowFor(event);
+    if (!window.isDestroyed()) window.webContents.send(Channels.onSiteCaptureProgress, progress);
     return { ok: true };
   });
 
@@ -428,8 +463,8 @@ export function registerIpcHandlers(deps: Deps): void {
 
   // --- Opening .sitearchive files ---
 
-  handle(Channels.siteArchiveOpen, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+  handle(Channels.siteArchiveOpen, async (_args, event) => {
+    const result = await dialog.showOpenDialog(windowFor(event), {
       title: 'Open Website Archive',
       properties: ['openFile'],
       filters: [{ name: 'Website Archive', extensions: [SITEARCHIVE_EXTENSION] }],
@@ -437,10 +472,10 @@ export function registerIpcHandlers(deps: Deps): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     const filePath = result.filePaths[0];
     if (!filePath) return null;
-    return openArchiveIntoTab(filePath);
+    return openArchiveIntoTab(filePath, event);
   });
 
-  handle(Channels.siteArchiveOpenPath, async (args) => openArchiveIntoTab(args.archivePath));
+  handle(Channels.siteArchiveOpenPath, async (args, event) => openArchiveIntoTab(args.archivePath, event));
 
   handle(Channels.siteArchiveRevealInFolder, (args) => {
     if (existsSync(args.archivePath)) shell.showItemInFolder(args.archivePath);
@@ -453,9 +488,9 @@ export function registerIpcHandlers(deps: Deps): void {
    * ever opens http(s) in a normal browsing tab -- never through the OS
    * shell, and never for any other scheme.
    */
-  handle(Channels.siteArchiveOpenLive, async (args) => {
+  handle(Channels.siteArchiveOpenLive, async (args, event) => {
     if (!/^https?:/i.test(args.url)) return { opened: false, reason: 'not-http' };
-    const { response } = await dialog.showMessageBox(mainWindow, {
+    const { response } = await dialog.showMessageBox(windowFor(event), {
       type: 'question',
       buttons: ['Open Live Page', 'Stay Offline'],
       defaultId: 1,
@@ -465,6 +500,7 @@ export function registerIpcHandlers(deps: Deps): void {
       detail: `${args.url}\n\nThis uses your internet connection and leaves the offline archive.`,
     });
     if (response !== 0) return { opened: false, reason: 'declined' };
+    const tabManager = tabManagerFor(event);
     const tabId = tabManager.createTab(args.url, false);
     tabManager.activateTab(tabId);
     return { opened: true, tabId };
@@ -475,9 +511,9 @@ export function registerIpcHandlers(deps: Deps): void {
    * point at an executable are never followed silently -- they come here
    * for an explicit confirmation, and executables are refused outright.
    */
-  handle(Channels.siteArchiveConfirmExternal, async (args) => {
+  handle(Channels.siteArchiveConfirmExternal, async (args, event) => {
     if (isExecutableUrl(args.url)) {
-      await dialog.showMessageBox(mainWindow, {
+      await dialog.showMessageBox(windowFor(event), {
         type: 'warning',
         buttons: ['OK'],
         title: 'Link blocked',
@@ -488,7 +524,7 @@ export function registerIpcHandlers(deps: Deps): void {
     }
 
     const isHttp = /^https?:/i.test(args.url);
-    const { response } = await dialog.showMessageBox(mainWindow, {
+    const { response } = await dialog.showMessageBox(windowFor(event), {
       type: 'question',
       buttons: ['Open', 'Cancel'],
       defaultId: 1,
@@ -500,6 +536,7 @@ export function registerIpcHandlers(deps: Deps): void {
     if (response !== 0) return { opened: false, reason: 'declined' };
 
     if (isHttp) {
+      const tabManager = tabManagerFor(event);
       const tabId = tabManager.createTab(args.url, false);
       tabManager.activateTab(tabId);
       return { opened: true, tabId };
@@ -518,8 +555,8 @@ export function registerIpcHandlers(deps: Deps): void {
    * server-side from the tab, never taken directly from the renderer, so a
    * search can only ever query the archive that tab is actually showing.
    */
-  handle(Channels.siteArchiveSearch, (args) => {
-    const archiveId = tabManager.getSiteArchiveIdForTab(args.tabId);
+  handle(Channels.siteArchiveSearch, (args, event) => {
+    const archiveId = tabManagerFor(event).getSiteArchiveIdForTab(args.tabId);
     if (!archiveId) return [];
     const archive = getOpenedArchive(archiveId);
     if (!archive) return [];
@@ -527,13 +564,14 @@ export function registerIpcHandlers(deps: Deps): void {
   });
 
   /** Jump a site-archive tab to one of its own pages, e.g. a search result. */
-  handle(Channels.siteArchiveNavigateToPage, (args) => {
+  handle(Channels.siteArchiveNavigateToPage, (args, event) => {
+    const tabManager = tabManagerFor(event);
     const archiveId = tabManager.getSiteArchiveIdForTab(args.tabId);
     if (!archiveId) return { ok: false };
     return { ok: tabManager.navigateSiteArchiveTab(args.tabId, archiveId, args.pageId) };
   });
 
-  async function openArchiveIntoTab(archivePath: string): Promise<OpenedSiteArchive> {
+  async function openArchiveIntoTab(archivePath: string, event: IpcMainInvokeEvent): Promise<OpenedSiteArchive> {
     try {
       const archive = await openSiteArchive(archivePath);
       registerOpenedArchive(archive);
@@ -544,6 +582,7 @@ export function registerIpcHandlers(deps: Deps): void {
       }
 
       const sess = getSiteArchiveSession();
+      const tabManager = tabManagerFor(event);
       const tabId = tabManager.openSiteArchiveTab(archive.manifest.archiveId, entryPageId, sess, {
         siteTitle: archive.manifest.siteTitle,
         archivePath,
@@ -566,7 +605,7 @@ export function registerIpcHandlers(deps: Deps): void {
       const message = err instanceof Error ? err.message : String(err);
       const code = err instanceof SiteArchiveError ? err.code : 'open-failed';
       logger.error('sitearchive.open_failed', { code, error: message });
-      await dialog.showMessageBox(mainWindow, {
+      await dialog.showMessageBox(windowFor(event), {
         type: 'error',
         buttons: ['OK'],
         title: 'Could not open archive',

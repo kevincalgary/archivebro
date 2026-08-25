@@ -1,10 +1,11 @@
-import type { BrowserWindow, Session } from 'electron';
+import type { Session } from 'electron';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS } from '../../shared/sitearchiveTypes';
 import { CaptureCancelledError, CaptureJob } from './crawler';
 import { RetryCancelledError, RetryJob } from './retryFailedPages';
 import { isStagingDirLive, replayCheckpoint } from './captureJournal';
 import { logger } from '../util/logger';
+import { getCaptureHostWindow } from '../windows/captureHostWindow';
 
 /**
  * The minimal surface CaptureManager needs to run, report on, and control
@@ -74,7 +75,6 @@ export class CaptureManager {
    * crawl continues from the queue rather than starting over.
    */
   async resumeInterrupted(input: {
-    window: BrowserWindow;
     session: Session;
     stagingDir: string;
   }): Promise<{ jobId: string; promise: Promise<CaptureResult | null> } | null> {
@@ -87,7 +87,7 @@ export class CaptureManager {
 
     return this.launch(
       new CaptureJob(
-        input.window,
+        getCaptureHostWindow(),
         input.session,
         checkpoint.meta.startUrl,
         checkpoint.meta.scope,
@@ -100,17 +100,17 @@ export class CaptureManager {
   }
 
   async start(input: {
-    window: BrowserWindow;
     session: Session;
     startUrl: string;
     scope: CaptureScope;
     outputPath: string;
   }): Promise<{ jobId: string; promise: Promise<CaptureResult | null> }> {
     const scope = CaptureManager.clampScope(input.scope);
-    return this.launch(new CaptureJob(input.window, input.session, input.startUrl, scope, input.outputPath), scope, {
-      resumed: false,
-      pagesAlreadyCaptured: 0,
-    });
+    return this.launch(
+      new CaptureJob(getCaptureHostWindow(), input.session, input.startUrl, scope, input.outputPath),
+      scope,
+      { resumed: false, pagesAlreadyCaptured: 0 },
+    );
   }
 
   /**
@@ -121,7 +121,6 @@ export class CaptureManager {
    * through.
    */
   retryFailedPages(input: {
-    window: BrowserWindow;
     session: Session;
     archivePath: string;
   }): { jobId: string; promise: Promise<CaptureResult | null> } {
@@ -129,7 +128,7 @@ export class CaptureManager {
       throw new Error('A capture is already running. Wait for it to finish or cancel it first.');
     }
 
-    const job = new RetryJob(input.window, input.session, input.archivePath);
+    const job = new RetryJob(getCaptureHostWindow(), input.session, input.archivePath);
     this.activeJob = job;
     job.onProgress((progress) => {
       for (const l of this.listeners) l(progress);

@@ -56,7 +56,7 @@ export function installPermissionHandlers(session: Session, settings: SettingsSt
     } catch {
       origin = 'this site';
     }
-    void requestPermissionFromUser(kind, origin).then((allow) => callback(allow));
+    void requestPermissionFromUser(kind, origin, webContents.id).then((allow) => callback(allow));
   });
 
   session.setPermissionCheckHandler((_webContents, permission) => {

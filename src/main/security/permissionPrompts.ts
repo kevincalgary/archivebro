@@ -32,7 +32,8 @@ const pending = new Map<string, PendingEntry>();
 /** Auto-deny if the user never answers, so a page can't hang on a prompt forever. */
 const PROMPT_TIMEOUT_MS = 2 * 60 * 1000;
 
-export type PromptEmitter = (request: PendingPermissionRequest) => void;
+/** sourceWebContentsId identifies the tab that asked, so the caller can route the prompt to its own window. */
+export type PromptEmitter = (request: PendingPermissionRequest, sourceWebContentsId: number) => void;
 
 let emit: PromptEmitter | null = null;
 
@@ -45,7 +46,11 @@ export function setPermissionPromptEmitter(emitter: PromptEmitter | null): void 
  * display a prompt or they don't respond in time -- never defaults to
  * allowing.
  */
-export function requestPermissionFromUser(permission: PermissionKind, origin: string): Promise<boolean> {
+export function requestPermissionFromUser(
+  permission: PermissionKind,
+  origin: string,
+  sourceWebContentsId: number,
+): Promise<boolean> {
   if (!emit) {
     logger.warn('permission.no_prompt_channel_denying', { permission });
     return Promise.resolve(false);
@@ -61,7 +66,7 @@ export function requestPermissionFromUser(permission: PermissionKind, origin: st
     }, PROMPT_TIMEOUT_MS);
 
     pending.set(requestId, { requestId, permission, origin, resolve, timer });
-    emit?.({ requestId, permission, origin });
+    emit?.({ requestId, permission, origin }, sourceWebContentsId);
   });
 }
 

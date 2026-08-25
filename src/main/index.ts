@@ -1,12 +1,11 @@
-import { app, session, BrowserWindow } from 'electron';
+import { app, session } from 'electron';
 import path from 'node:path';
 import { initLogger, logger, redactUrl, setDiagnosticLogging } from './util/logger';
 import { openDatabase, closeDatabase } from './db/database';
 import { ArchiveRepo } from './db/archiveRepo';
 import { SettingsStore } from './settings/settingsStore';
 import { CaptureService } from './capture/captureService';
-import { TabManager } from './browser/tabManager';
-import { createMainWindow } from './windows/mainWindow';
+import { createAppWindow, type AppWindowDeps } from './windows/appWindow';
 import { buildAppMenu } from './windows/appMenu';
 import { registerIpcHandlers } from './ipc/handlers';
 import { registerArchiveSchemeAsPrivileged, registerArchiveProtocolHandler, expectedHashLookup } from './offline/offlineProtocol';
@@ -20,6 +19,8 @@ import { registerArchiveSiteSchemeAsPrivileged, closeAllOpenedArchives } from '.
 import { setPermissionPromptEmitter, denyAllPendingPermissions } from './security/permissionPrompts';
 import { SITEARCHIVE_EXTENSION } from '../shared/sitearchiveTypes';
 import { UpdateService } from './updates/updateService';
+import { destroyCaptureHostWindow } from './windows/captureHostWindow';
+import { allEntries, findEntryForTabWebContents, getFocusedEntry } from './windows/windowRegistry';
 
 // Must run before app.whenReady().
 registerArchiveSchemeAsPrivileged();
@@ -29,7 +30,7 @@ registerArchiveSiteSchemeAsPrivileged();
  * .sitearchive files opened by double-clicking arrive differently per OS:
  * macOS fires 'open-file' (possibly before the app is ready), while
  * Windows/Linux pass the path in argv. Both funnel into this queue, which
- * is drained once the window exists.
+ * is drained once at least one window exists.
  */
 const pendingArchiveOpens: string[] = [];
 let openArchiveFile: ((filePath: string) => void) | null = null;
@@ -57,10 +58,10 @@ if (!gotSingleInstanceLock) {
   // Windows/Linux: a second launch (e.g. double-clicking another archive)
   // forwards its argv here instead of starting a new process.
   app.on('second-instance', (_event, argv) => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
+    const entry = getFocusedEntry();
+    if (entry) {
+      if (entry.window.isMinimized()) entry.window.restore();
+      entry.window.focus();
     }
     for (const p of archivePathsFromArgv(argv)) queueArchiveOpen(p);
   });
@@ -109,68 +110,58 @@ async function main(): Promise<void> {
   // archives directory.
   registerArchiveProtocolHandler(session.defaultSession, () => settings.get().archiveStorageDir, expectedHashLookup(archiveRepo));
 
-  const mainWindow = createMainWindow();
   const captureService = new CaptureService(archiveRepo, settings);
-  const tabManager = new TabManager(mainWindow, settings, captureService);
   const captureManager = new CaptureManager();
+  const windowDeps: AppWindowDeps = {
+    settings,
+    captureService,
+    onAllWindowsClosed: () => {
+      denyAllPendingPermissions();
+      if (process.platform !== 'darwin') {
+        if (storageInterval) clearInterval(storageInterval);
+        closeDatabase();
+        app.quit();
+      }
+    },
+  };
 
-  updateService = new UpdateService(mainWindow, settings);
+  updateService = new UpdateService(settings);
   updateService.start();
 
-  registerIpcHandlers({ mainWindow, tabManager, settings, archiveRepo, captureManager, updateService });
-  buildAppMenu(mainWindow, tabManager, () => void updateService?.checkNow());
-  installTestHooks({ archiveRepo, settings, tabManager, captureManager });
-
-  // Route "ask" permission requests to the trusted UI. If the window is
-  // gone there is nothing to ask, and permissionPrompts denies rather than
-  // leaving the page waiting.
-  setPermissionPromptEmitter((request) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onPermissionRequest, request);
-  });
-  mainWindow.on('closed', () => {
-    setPermissionPromptEmitter(null);
-    denyAllPendingPermissions();
+  registerIpcHandlers({ settings, archiveRepo, captureManager, updateService });
+  buildAppMenu(
+    () => createAppWindow(windowDeps),
+    () => void updateService?.checkNow(),
+  );
+  installTestHooks({
+    archiveRepo,
+    settings,
+    captureManager,
+    createWindowForTesting: () => void createAppWindow(windowDeps),
   });
 
-  captureManager.onProgress((progress) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onSiteCaptureProgress, progress);
-  });
-
-  // An archived page can't use IPC, so "Open Live Version" and external
-  // links surface here and are routed through the confirming handlers.
-  tabManager.onSiteArchiveOpenLive((url) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(Channels.onSiteArchiveOpenRequest, { kind: 'open-live', url });
-    }
-  });
-  tabManager.onSiteArchiveExternalLink((url) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(Channels.onSiteArchiveOpenRequest, { kind: 'external', url });
+  // Route "ask" permission requests to the window that owns the asking
+  // tab; falls back to the focused window for the rare case a tab's owner
+  // can't be found (e.g. the tab's window closed in the same tick).
+  setPermissionPromptEmitter((request, sourceWebContentsId) => {
+    const entry = findEntryForTabWebContents(sourceWebContentsId) ?? getFocusedEntry();
+    if (entry && !entry.window.isDestroyed()) {
+      entry.window.webContents.send(Channels.onPermissionRequest, request);
     }
   });
 
-  // Drain any .sitearchive double-click that arrived before we were ready.
+  // Drain any .sitearchive double-click that arrived before any window
+  // existed yet, into whichever window is focused (creating one if every
+  // window has since been closed, e.g. a second instance launched on
+  // macOS after the user closed all windows but left the app running).
   openArchiveFile = (filePath) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(Channels.onSiteArchiveOpenRequest, { kind: 'open-archive', path: filePath });
-    }
+    const entry = getFocusedEntry() ?? createAppWindow(windowDeps);
+    entry.window.webContents.send(Channels.onSiteArchiveOpenRequest, { kind: 'open-archive', path: filePath });
   };
-  mainWindow.webContents.once('did-finish-load', () => {
-    for (const p of pendingArchiveOpens.splice(0)) openArchiveFile?.(p);
-  });
 
-  // Push tab-state and capture-status updates to the renderer as they happen.
-  tabManager.onTabState((state) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onTabState, state);
-  });
-  tabManager.onTabClosed((tabId) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onTabClosed, tabId);
-  });
-  tabManager.onTabActivated((tabId) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onTabActivated, tabId);
-  });
-  captureService.onCaptureStatus((tabId, status, archiveId) => {
-    if (!mainWindow.isDestroyed()) mainWindow.webContents.send(Channels.onCaptureStatus, { tabId, status, archiveId });
+  const firstEntry = createAppWindow(windowDeps);
+  firstEntry.window.webContents.once('did-finish-load', () => {
+    for (const p of pendingArchiveOpens.splice(0)) openArchiveFile?.(p);
   });
 
   // Storage policies (retention / max disk usage) are opt-in and only take
@@ -180,42 +171,22 @@ async function main(): Promise<void> {
   void enforceStoragePolicies(archiveRepo, settings);
   storageInterval = setInterval(() => void enforceStoragePolicies(archiveRepo, settings), 10 * 60 * 1000);
 
-  const firstTabId = tabManager.createTab(undefined, false);
-  tabManager.activateTab(firstTabId);
-
-  // On macOS the convention is that closing the window doesn't quit the
-  // app, and the dock icon reopens the same window. TabManager holds a
-  // reference to this specific BrowserWindow instance (its WebContentsViews
-  // are children of its contentView), so we hide-on-close and show-on-
-  // activate rather than destroying and recreating the window, which would
-  // leave TabManager pointing at a dead window.
-  let isQuitting = false;
-  app.on('before-quit', () => {
-    isQuitting = true;
-  });
-  mainWindow.on('close', (event) => {
-    if (process.platform === 'darwin' && !isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
-  });
+  // Every window is a real, independently closable BrowserWindow (each
+  // with its own TabManager torn down on close -- see appWindow.ts), so
+  // there's no need to hide-and-reshow one distinguished window the way a
+  // single-window app has to. macOS keeps the app running with zero
+  // windows open (dock icon convention); a dock-icon click with none open
+  // creates a fresh one.
   app.on('activate', () => {
-    if (!mainWindow.isDestroyed()) mainWindow.show();
+    if (allEntries().length === 0) createAppWindow(windowDeps);
   });
 }
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    if (storageInterval) clearInterval(storageInterval);
-    closeDatabase();
-    app.quit();
-  }
-});
 
 app.on('will-quit', () => {
   if (storageInterval) clearInterval(storageInterval);
   updateService?.stop();
   closeAllOpenedArchives();
+  destroyCaptureHostWindow();
   closeDatabase();
 });
 

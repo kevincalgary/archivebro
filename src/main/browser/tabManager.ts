@@ -374,6 +374,19 @@ export class TabManager {
     for (const l of this.closedListeners) l(id);
   }
 
+  /** True if the given webContents id belongs to one of this window's tabs (never the chrome window itself). */
+  ownsWebContents(webContentsId: number): boolean {
+    for (const tab of this.tabs.values()) {
+      if (!tab.view.webContents.isDestroyed() && tab.view.webContents.id === webContentsId) return true;
+    }
+    return false;
+  }
+
+  /** Close every tab, e.g. because the window hosting them is being destroyed. */
+  disposeAll(): void {
+    for (const id of [...this.tabs.keys()]) this.closeTab(id);
+  }
+
   onTabActivated(listener: (tabId: string) => void): void {
     this.activatedListeners.push(listener);
   }

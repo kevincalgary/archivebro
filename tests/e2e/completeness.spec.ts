@@ -121,7 +121,7 @@ test.describe('diagnostic logging setting', () => {
     const hooks = siteHooks(handle.app);
     expect((await hooks.getSettings()).diagnosticLogging).toBe(false);
 
-    await handle.window.getByRole('button', { name: '⚙' }).click();
+    await handle.window.getByRole('button', { name: 'Settings' }).click();
     const toggle = handle.window
       .locator('.checkbox-row', { hasText: 'Record full URLs in the log file' })
       .locator('input[type="checkbox"]');

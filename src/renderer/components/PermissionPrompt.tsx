@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { PermissionKind } from '../../shared/types';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 export interface PermissionRequest {
   requestId: string;
@@ -41,10 +42,13 @@ export default function PermissionPrompt({ request, onRespond }: Props) {
     title: `use ${request.permission}`,
     detail: 'This site is requesting a browser capability.',
   };
+  // Escape denies rather than doing nothing -- matches the note below
+  // ("Closing this without answering denies the request").
+  const dialogRef = useDialogA11y(() => onRespond(false, remember));
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog permission-dialog" role="dialog" aria-label="Permission request">
+      <div className="dialog permission-dialog" role="dialog" aria-modal="true" aria-label="Permission request" ref={dialogRef} tabIndex={-1}>
         <h2>Allow this site to {info.title}?</h2>
 
         <div className="permission-origin">{request.origin}</div>

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RecoverableCaptureSummary } from '../../../shared/sitearchiveTypes';
 import { Spinner } from '../Progress';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 
 interface Props {
   captures: RecoverableCaptureSummary[];
@@ -57,6 +58,14 @@ function RecoveryItem({
   onDiscard: () => void;
 }) {
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const discardButtonRef = useRef<HTMLButtonElement>(null);
+
+  // The Discard/Cancel pair replaces the Resume/Finish/Discard row
+  // in place; without this, focus is left on a button that no longer
+  // exists in the accessibility tree once React re-renders this swap.
+  useEffect(() => {
+    if (confirmingDiscard) discardButtonRef.current?.focus();
+  }, [confirmingDiscard]);
 
   return (
     <div className="recovery-item">
@@ -87,7 +96,7 @@ function RecoveryItem({
         {confirmingDiscard ? (
           <>
             <span className="recovery-confirm-label">Discard everything captured so far?</span>
-            <button className="danger" disabled={busy} onClick={onDiscard}>
+            <button className="danger" disabled={busy} onClick={onDiscard} ref={discardButtonRef}>
               Discard
             </button>
             <button disabled={busy} onClick={() => setConfirmingDiscard(false)}>
@@ -124,9 +133,11 @@ function RecoveryItem({
  * purely a display and confirmation layer over it.
  */
 export default function RecoveryDialog({ captures, busyId, errorById, onResume, onFinish, onDiscard, onDismiss }: Props) {
+  const dialogRef = useDialogA11y(onDismiss);
+
   return (
     <div className="dialog-overlay">
-      <div className="dialog recovery-dialog" role="dialog" aria-label="Interrupted captures">
+      <div className="dialog recovery-dialog" role="dialog" aria-modal="true" aria-label="Interrupted captures" ref={dialogRef} tabIndex={-1}>
         <h2>Interrupted capture{captures.length === 1 ? '' : 's'}</h2>
         <p className="recovery-intro">
           {captures.length === 1

@@ -4,9 +4,26 @@
   --bg-input: #333;
   --border: #444;
   --text: #e8e8e8;
-  --text-dim: #9a9a9a;
+  /* Lightened from #9a9a9a: fine (5:1+) against --bg/--bg-elevated, but
+     only 4.47-4.49:1 against --bg-input and the capture-dialog's custom
+     scope-choice background (both need 4.5:1) -- this clears all of them. */
+  --text-dim: #a2a2a2;
   --accent: #4a90e2;
-  --danger: #e25c5c;
+  /* A darker shade for solid fills with white text on top (buttons, the
+     update banner) -- #4a90e2 itself only reaches 3.29:1 with white text
+     (WCAG AA needs 4.5:1 for normal-size text), but it's kept as-is for
+     borders/focus rings, where it already clears the (lower, 3:1) bar
+     against this app's dark backgrounds and a change would need
+     re-checking each of those separately. */
+  --accent-solid: #2864a8;
+  /* Lightened from the original #e25c5c: as plain text/border color it's
+     fine at 4.70:1 against --bg, but only 4.05:1 against --bg-elevated
+     (WCAG AA needs 4.5:1) -- this shade clears both. */
+  --danger: #e87878;
+  /* A darker shade for solid fills with white text (danger buttons):
+     --danger itself is deliberately light (for the text-color case
+     above), which only reaches 3.55:1 as a background under white text. */
+  --danger-solid: #c33e3e;
   --success: #4ac26b;
   --warn: #e2b04a;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -61,6 +78,20 @@ body,
   cursor: pointer;
   color: var(--text-dim);
   white-space: nowrap;
+}
+
+.tab-hit-area {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tab-hit-area:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 3px;
 }
 
 .tab-active {
@@ -166,6 +197,10 @@ body,
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0 8px;
+}
+
+.address-bar-form:focus-within {
+  border-color: var(--accent);
 }
 
 .address-bar-input {
@@ -546,8 +581,8 @@ body,
 
 .archive-detail-actions button.danger,
 .settings-screen button.danger {
-  background: var(--danger);
-  border-color: var(--danger);
+  background: var(--danger-solid);
+  border-color: var(--danger-solid);
   color: white;
 }
 
@@ -600,7 +635,7 @@ body,
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  background: var(--accent);
+  background: var(--accent-solid);
   color: #fff;
   font-size: 13px;
   flex-shrink: 0;
@@ -707,8 +742,8 @@ body,
 
 /* --- Capture the Page button --- */
 .capture-page-button {
-  background: var(--accent) !important;
-  border-color: var(--accent) !important;
+  background: var(--accent-solid) !important;
+  border-color: var(--accent-solid) !important;
   color: #fff !important;
   font-weight: 600;
   white-space: nowrap;
@@ -764,15 +799,15 @@ body,
 }
 
 .dialog-actions button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
   color: #fff;
   font-weight: 600;
 }
 
 .dialog-actions button.danger {
-  background: var(--danger);
-  border-color: var(--danger);
+  background: var(--danger-solid);
+  border-color: var(--danger-solid);
   color: #fff;
 }
 

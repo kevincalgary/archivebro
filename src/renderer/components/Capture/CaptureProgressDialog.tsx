@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CaptureProgress } from '../../../shared/sitearchiveTypes';
 import { ProgressBar, Spinner } from '../Progress';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 
 interface Props {
   progress: CaptureProgress;
@@ -68,10 +69,21 @@ export default function CaptureProgressDialog({
   // Finalizing (zipping + checksums) has no countable unit, so it gets an
   // indeterminate bar rather than a made-up percentage.
   const showDeterminate = !isDone && progress.state !== 'finalizing' && progress.pagesDiscovered > 0;
+  // Escape only closes once there's nothing left to lose -- cancelling an
+  // in-progress capture is a deliberate, consequential action that stays
+  // behind its own Cancel button, not a side effect of dismissing.
+  const dialogRef = useDialogA11y(isDone ? onClose : undefined);
 
   return (
     <div className="dialog-overlay">
-      <div className="dialog capture-progress-dialog" role="dialog" aria-label="Capture progress">
+      <div
+        className="dialog capture-progress-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Capture progress"
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <h2>
           {progress.kind === 'retry'
             ? progress.state === 'completed'

@@ -47,15 +47,16 @@ export default function LibraryScreen({ onOpenLive }: Props) {
 
   return (
     <div className="library-screen">
-      <div className="library-header">
+      <div className="library-header" role="search">
         <h1>Library</h1>
         <input
           className="library-search"
+          aria-label="Search title, URL, or page text"
           placeholder="Search title, URL, or page text…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select value={domain} onChange={(e) => setDomain(e.target.value)}>
+        <select aria-label="Filter by domain" value={domain} onChange={(e) => setDomain(e.target.value)}>
           <option value="">All domains</option>
           {domains.map((d) => (
             <option key={d} value={d}>
@@ -63,7 +64,11 @@ export default function LibraryScreen({ onOpenLive }: Props) {
             </option>
           ))}
         </select>
-        <select value={status} onChange={(e) => setStatus(e.target.value as LibraryQuery['status'] | '')}>
+        <select
+          aria-label="Filter by status"
+          value={status}
+          onChange={(e) => setStatus(e.target.value as LibraryQuery['status'] | '')}
+        >
           <option value="">Any status</option>
           <option value="success">Success</option>
           <option value="failed">Failed</option>
@@ -75,7 +80,7 @@ export default function LibraryScreen({ onOpenLive }: Props) {
             Sorted by relevance
           </span>
         ) : (
-          <select value={sort} onChange={(e) => setSort(e.target.value as LibraryQuery['sort'])}>
+          <select aria-label="Sort by" value={sort} onChange={(e) => setSort(e.target.value as LibraryQuery['sort'])}>
             <option value="newest">Newest first</option>
             <option value="oldest">Oldest first</option>
             <option value="domain">Domain</option>
@@ -84,7 +89,7 @@ export default function LibraryScreen({ onOpenLive }: Props) {
         )}
       </div>
 
-      <div className="library-meta">
+      <div className="library-meta" aria-live="polite">
         {loading ? (
           <Spinner size={12} label="Searching archives…" />
         ) : (

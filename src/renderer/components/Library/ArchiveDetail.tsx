@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ArchiveDetail as ArchiveDetailType, ArchiveRecord } from '../../../shared/types';
 import { useAppStore } from '../../state/store';
 import { LoadingPanel, Spinner } from '../Progress';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 
 interface Props {
   archiveId: string;
@@ -17,6 +18,7 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
   const [titleDraft, setTitleDraft] = useState('');
   const [tagsDraft, setTagsDraft] = useState('');
   const [exporting, setExporting] = useState(false);
+  const dialogRef = useDialogA11y(onClose);
 
   useEffect(() => {
     void window.archiveBrowser.library.getDetail(archiveId).then((d) => {
@@ -34,7 +36,7 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
   if (!detail) {
     return (
       <div className="archive-detail-overlay" onClick={onClose}>
-        <div className="archive-detail" onClick={(e) => e.stopPropagation()}>
+        <div className="archive-detail" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Archive details">
           <LoadingPanel message="Loading archive details…" />
         </div>
       </div>
@@ -43,7 +45,15 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
 
   return (
     <div className="archive-detail-overlay" onClick={onClose}>
-      <div className="archive-detail" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="archive-detail"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Archive details: ${detail.title || detail.finalUrl}`}
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <button className="archive-detail-close" onClick={onClose} aria-label="Close">
           ×
         </button>
@@ -52,11 +62,15 @@ export default function ArchiveDetail({ archiveId, onClose, onChanged, onOpenLiv
           <img className="archive-detail-thumb" src={`archive://${detail.id}/screenshot.png`} alt="" />
         )}
 
-        <label className="field-label">Title</label>
-        <input value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} />
+        <label className="field-label" htmlFor="archive-detail-title">
+          Title
+        </label>
+        <input id="archive-detail-title" value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} />
 
-        <label className="field-label">Tags (comma separated)</label>
-        <input value={tagsDraft} onChange={(e) => setTagsDraft(e.target.value)} />
+        <label className="field-label" htmlFor="archive-detail-tags">
+          Tags (comma separated)
+        </label>
+        <input id="archive-detail-tags" value={tagsDraft} onChange={(e) => setTagsDraft(e.target.value)} />
 
         <button
           onClick={async () => {

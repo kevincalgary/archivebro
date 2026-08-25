@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { TabState } from '../../shared/types';
 import type { SiteArchiveSearchResult } from '../../shared/sitearchiveTypes';
 import type { Screen } from '../state/store';
@@ -60,6 +60,14 @@ export default function Toolbar({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SiteArchiveSearchResult[]>([]);
   const tabId = tab?.id;
+  const searchToggleRef = useRef<HTMLButtonElement>(null);
+
+  function closeSearch() {
+    setSearchOpen(false);
+    // The input this focus was on is about to unmount; move it back to
+    // the toggle button rather than letting it fall back to <body>.
+    searchToggleRef.current?.focus();
+  }
 
   // Switching to a different tab (or away from a site-archive tab
   // entirely) closes the panel rather than leaving a stale search open
@@ -124,6 +132,7 @@ export default function Toolbar({
         <input
           ref={addressBarRef}
           className="address-bar-input"
+          aria-label="Address bar"
           value={inputValue}
           placeholder="Search or enter address"
           disabled={screen !== 'browser' || tab?.isOffline}
@@ -136,9 +145,11 @@ export default function Toolbar({
       {tab?.isSiteArchive && (
         <div className="sitearchive-search">
           <button
+            ref={searchToggleRef}
             className={searchOpen ? 'toggle-active' : ''}
             onClick={() => setSearchOpen((open) => !open)}
             aria-label="Search inside this archive"
+            aria-expanded={searchOpen}
             title="Search inside this archive"
           >
             🔍
@@ -148,11 +159,12 @@ export default function Toolbar({
               <input
                 autoFocus
                 className="sitearchive-search-input"
+                aria-label="Search inside this archive"
                 value={searchQuery}
                 placeholder="Search this archive…"
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Escape') setSearchOpen(false);
+                  if (e.key === 'Escape') closeSearch();
                 }}
               />
               {searchResults.length > 0 && (
@@ -202,7 +214,7 @@ export default function Toolbar({
       <button onClick={onOpenLibrary} title="Library (Cmd/Ctrl+Shift+L)">
         📚 Library
       </button>
-      <button onClick={onOpenSettings} title="Settings (Cmd/Ctrl+,)">
+      <button onClick={onOpenSettings} aria-label="Settings" title="Settings (Cmd/Ctrl+,)">
         ⚙
       </button>
     </div>

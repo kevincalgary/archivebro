@@ -71,7 +71,10 @@ export default function SettingsScreen() {
 
   return (
     <div className="settings-screen">
-      <h1>Settings {savedFlash && <span className="settings-saved">Saved</span>}</h1>
+      <h1>
+        Settings{' '}
+        <span aria-live="polite">{savedFlash && <span className="settings-saved">Saved</span>}</span>
+      </h1>
 
       <section>
         <h2>Automatic capture</h2>
@@ -248,7 +251,11 @@ export default function SettingsScreen() {
             <button onClick={() => window.archiveBrowser.updates.installNow()}>Restart and install</button>
           )}
         </div>
-        {updateStatusText(updateStatus) && <p className="settings-note">{updateStatusText(updateStatus)}</p>}
+        {updateStatusText(updateStatus) && (
+          <p className="settings-note" aria-live="polite">
+            {updateStatusText(updateStatus)}
+          </p>
+        )}
       </section>
 
       <section>
@@ -327,7 +334,11 @@ export default function SettingsScreen() {
             Import whole library…
           </button>
         </div>
-        {libraryTransferStatus && <p className="settings-note">{libraryTransferStatus}</p>}
+        {libraryTransferStatus && (
+          <p className="settings-note" aria-live="polite">
+            {libraryTransferStatus}
+          </p>
+        )}
         <p className="settings-note">
           Export bundles every archived page (files + catalog entries) into one portable zip, for backing up or
           moving your Library to another machine. Import adds archives from that zip that aren't already in this

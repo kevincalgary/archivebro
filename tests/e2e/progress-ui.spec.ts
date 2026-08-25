@@ -152,7 +152,7 @@ test.describe('progress and loading feedback', () => {
   });
 
   test('settings shows a loading panel before the settings arrive', async () => {
-    await handle.window.getByRole('button', { name: '⚙' }).click();
+    await handle.window.getByRole('button', { name: 'Settings' }).click();
     // Either the spinner (still loading) or the loaded form must appear --
     // never an empty screen.
     await expect(handle.window.locator('.settings-screen')).toBeVisible();

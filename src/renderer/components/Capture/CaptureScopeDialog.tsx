@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { CaptureScope, CaptureScopeKind } from '../../../shared/sitearchiveTypes';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 import {
   DEFAULT_CAPTURE_SCOPE,
   DEFAULT_SITE_SCOPE,
@@ -67,9 +68,19 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
     setConfirmedOverLimit(false);
   }
 
+  const dialogRef = useDialogA11y(onCancel);
+
   return (
     <div className="dialog-overlay" onClick={onCancel}>
-      <div className="dialog capture-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Capture the Page">
+      <div
+        className="dialog capture-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Capture the Page"
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <h2>Capture the Page</h2>
         <div className="capture-target">
           <div className="capture-target-title">{pageTitle || pageUrl}</div>

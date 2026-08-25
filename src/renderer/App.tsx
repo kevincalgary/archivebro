@@ -227,7 +227,7 @@ export default function App() {
   return (
     <div className="app-shell">
       {updateStatus?.state === 'downloaded' && !updateBannerDismissed && (
-        <div className="update-banner">
+        <div className="update-banner" role="status" aria-live="polite">
           <span>Version {updateStatus.version} is ready — restart to update.</span>
           <button onClick={() => window.archiveBrowser.updates.installNow()}>Restart and update</button>
           <button className="update-banner-dismiss" onClick={() => setUpdateBannerDismissed(true)}>
@@ -235,60 +235,62 @@ export default function App() {
           </button>
         </div>
       )}
-      <TabBar
-        tabs={tabs}
-        activeTabId={activeTabId}
-        onSelect={async (id) => {
-          await window.archiveBrowser.tabs.activate(id);
-          setActiveTabId(id);
-          setScreen('browser');
-        }}
-        onClose={async (id) => {
-          await window.archiveBrowser.tabs.close(id);
-        }}
-        onNewTab={async () => {
-          const id = await window.archiveBrowser.tabs.create();
-          await window.archiveBrowser.tabs.activate(id);
-          setActiveTabId(id);
-          setScreen('browser');
-        }}
-      />
-      <Toolbar
-        tab={activeTab}
-        screen={screen}
-        addressBarRef={addressBarRef}
-        onNavigate={async (input) => {
-          if (activeTabId) await window.archiveBrowser.tabs.navigate(activeTabId, input);
-        }}
-        onBack={async () => activeTabId && window.archiveBrowser.tabs.goBack(activeTabId)}
-        onForward={async () => activeTabId && window.archiveBrowser.tabs.goForward(activeTabId)}
-        onReload={async () => activeTabId && window.archiveBrowser.tabs.reload(activeTabId)}
-        onStop={async () => activeTabId && window.archiveBrowser.tabs.stop(activeTabId)}
-        onNewPrivateTab={async () => {
-          const id = await window.archiveBrowser.tabs.createPrivate();
-          await window.archiveBrowser.tabs.activate(id);
-          setActiveTabId(id);
-          setScreen('browser');
-        }}
-        onToggleArchivePaused={async () => {
-          if (activeTabId && activeTab) {
-            await window.archiveBrowser.tabs.setArchivingPaused(activeTabId, !activeTab.isArchivingPaused);
+      <header>
+        <TabBar
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelect={async (id) => {
+            await window.archiveBrowser.tabs.activate(id);
+            setActiveTabId(id);
+            setScreen('browser');
+          }}
+          onClose={async (id) => {
+            await window.archiveBrowser.tabs.close(id);
+          }}
+          onNewTab={async () => {
+            const id = await window.archiveBrowser.tabs.create();
+            await window.archiveBrowser.tabs.activate(id);
+            setActiveTabId(id);
+            setScreen('browser');
+          }}
+        />
+        <Toolbar
+          tab={activeTab}
+          screen={screen}
+          addressBarRef={addressBarRef}
+          onNavigate={async (input) => {
+            if (activeTabId) await window.archiveBrowser.tabs.navigate(activeTabId, input);
+          }}
+          onBack={async () => activeTabId && window.archiveBrowser.tabs.goBack(activeTabId)}
+          onForward={async () => activeTabId && window.archiveBrowser.tabs.goForward(activeTabId)}
+          onReload={async () => activeTabId && window.archiveBrowser.tabs.reload(activeTabId)}
+          onStop={async () => activeTabId && window.archiveBrowser.tabs.stop(activeTabId)}
+          onNewPrivateTab={async () => {
+            const id = await window.archiveBrowser.tabs.createPrivate();
+            await window.archiveBrowser.tabs.activate(id);
+            setActiveTabId(id);
+            setScreen('browser');
+          }}
+          onToggleArchivePaused={async () => {
+            if (activeTabId && activeTab) {
+              await window.archiveBrowser.tabs.setArchivingPaused(activeTabId, !activeTab.isArchivingPaused);
+            }
+          }}
+          onOpenLibrary={() => setScreen('library')}
+          onOpenSettings={() => setScreen('settings')}
+          captureBusy={
+            captureProgress !== null &&
+            !['completed', 'failed', 'cancelled'].includes(captureProgress.state)
           }
-        }}
-        onOpenLibrary={() => setScreen('library')}
-        onOpenSettings={() => setScreen('settings')}
-        captureBusy={
-          captureProgress !== null &&
-          !['completed', 'failed', 'cancelled'].includes(captureProgress.state)
-        }
-        onCapturePage={async () => {
-          if (!activeTabId) return;
-          const info = await window.archiveBrowser.siteCapture.estimate(activeTabId);
-          if (!info.canCapture) return;
-          setScopeDialog({ url: info.url, title: info.title, host: info.host });
-        }}
-      />
-      <div className="app-content">
+          onCapturePage={async () => {
+            if (!activeTabId) return;
+            const info = await window.archiveBrowser.siteCapture.estimate(activeTabId);
+            if (!info.canCapture) return;
+            setScopeDialog({ url: info.url, title: info.title, host: info.host });
+          }}
+        />
+      </header>
+      <main className="app-content">
         {/* BrowserSurface is always mounted so its ResizeObserver keeps
             reporting bounds, but it only claims screen space (and the
             WebContentsView only becomes visible) while screen === 'browser'. */}
@@ -308,7 +310,7 @@ export default function App() {
             detail={`Verifying contents of ${openingArchive.split('/').pop()}`}
           />
         )}
-      </div>
+      </main>
 
       {permissionRequest && (
         <PermissionPrompt

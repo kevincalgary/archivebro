@@ -28,7 +28,18 @@ const ICONS: Record<CaptureStatus, string> = {
 };
 
 export default function CaptureIndicator({ status, paused }: Props) {
-  if (paused) return <span className="capture-indicator" title="Automatic archiving paused for this tab">⏸</span>;
+  if (paused) {
+    return (
+      <span
+        className="capture-indicator"
+        title="Automatic archiving paused for this tab"
+        role="status"
+        aria-label="Automatic archiving paused for this tab"
+      >
+        ⏸
+      </span>
+    );
+  }
   if (!status || status === 'idle') return null;
 
   // The pending/capturing states animate (see .capture-pending /

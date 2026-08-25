@@ -75,6 +75,21 @@ const routes = {
           .join(''),
     ),
   }),
+  // Library search-ranking test (tests/e2e/library-and-deletion.spec.ts):
+  // the same rare term appears in this page's <title> ...
+  '/search-rank-title': () => ({
+    status: 200,
+    body: html('Zzyzxwidget Page', '<h1>Zzyzxwidget Page</h1><p>Nothing else interesting here.</p>'),
+  }),
+  // ... and only in this page's body text, never its title, so a search
+  // for the term can prove relevance ranking put the title match first.
+  '/search-rank-body': () => ({
+    status: 200,
+    body: html(
+      'Unrelated Title',
+      '<p>This paragraph is mostly filler, but it does mention zzyzxwidget once, in passing.</p>',
+    ),
+  }),
 };
 
 function startFixtureServer(port = 0) {

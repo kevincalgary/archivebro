@@ -76,13 +76,28 @@ export interface LibraryQuery {
   status?: ArchiveRecord['status'];
   dateFrom?: string;
   dateTo?: string;
+  /** Ignored (relevance is used instead) whenever `search` is set — see ArchiveRepo.query(). */
   sort?: 'newest' | 'oldest' | 'domain' | 'size';
   limit?: number;
   offset?: number;
 }
 
+/**
+ * A matched span inside `snippet` is wrapped in these two marker
+ * characters (from FTS5's own `snippet()`, not raw HTML) so the renderer
+ * can highlight it by splitting on them, rather than needing to trust or
+ * sanitize embedded markup.
+ */
+export const SNIPPET_MARK_START = '\u0001';
+export const SNIPPET_MARK_END = '\u0002';
+
+export interface LibraryResultItem extends ArchiveRecord {
+  /** A relevance-ranked excerpt around the match, present only when the query included a search term. */
+  snippet: string | null;
+}
+
 export interface LibraryPage {
-  items: ArchiveRecord[];
+  items: LibraryResultItem[];
   total: number;
 }
 

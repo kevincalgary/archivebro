@@ -4,7 +4,7 @@ import os from 'node:os';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import { startFixtureServer } from '../../fixtures/server';
-import type { ArchiveRecord, TabState, AppSettings } from '../../src/shared/types';
+import type { ArchiveRecord, LibraryResultItem, TabState, AppSettings } from '../../src/shared/types';
 
 const ROOT = path.join(__dirname, '..', '..');
 
@@ -156,7 +156,7 @@ export function testHooks(app: ElectronApplication) {
   return {
     listTabs: (): Promise<TabState[]> =>
       app.evaluate(() => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.tabManager.list()),
-    queryArchives: (query: Record<string, unknown> = {}): Promise<{ items: ArchiveRecord[]; total: number }> =>
+    queryArchives: (query: Record<string, unknown> = {}): Promise<{ items: LibraryResultItem[]; total: number }> =>
       app.evaluate(
         ({}, q) => (globalThis as any).__ARCHIVE_BROWSER_TEST_HOOKS__.archiveRepo.query(q),
         query,

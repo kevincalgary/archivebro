@@ -1,5 +1,13 @@
 import type Database from 'better-sqlite3';
-import type { ArchiveDetail, ArchiveRecord, CaptureWarning, LibraryPage, LibraryQuery } from '../../shared/types';
+import type {
+  ArchiveDetail,
+  ArchiveRecord,
+  CaptureWarning,
+  LibraryPage,
+  LibraryQuery,
+  LibraryResultItem,
+} from '../../shared/types';
+import { SNIPPET_MARK_START, SNIPPET_MARK_END } from '../../shared/types';
 import { sanitizeFtsQuery } from '../util/ftsQuery';
 
 interface ArchiveRow {
@@ -170,11 +178,18 @@ export class ArchiveRepo {
     const clauses: string[] = ['a.deleted = 0'];
     const params: Record<string, unknown> = {};
 
+    const isSearch = !!(q.search && q.search.trim().length > 0);
     let fromClause = 'FROM archives a';
-    if (q.search && q.search.trim().length > 0) {
+    let snippetSelect = 'NULL as snippet';
+    if (isSearch) {
       fromClause = 'FROM archives_fts f JOIN archives a ON a.id = f.archive_id';
       clauses.push('archives_fts MATCH @search');
-      params.search = sanitizeFtsQuery(q.search.trim());
+      params.search = sanitizeFtsQuery(q.search!.trim());
+      // -1 picks whichever indexed column (title/url/domain/body) the
+      // match actually landed in, rather than assuming it's always the
+      // body text. The marker characters are fixed constants (not user
+      // input), so splicing them into the SQL text here is safe.
+      snippetSelect = `snippet(archives_fts, -1, '${SNIPPET_MARK_START}', '${SNIPPET_MARK_END}', '…', 10) as snippet`;
     }
     if (q.domain) {
       clauses.push('a.domain = @domain');
@@ -194,8 +209,14 @@ export class ArchiveRepo {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const orderBy =
-      q.sort === 'oldest'
+    // A search ranks by relevance (bm25 -- more negative is a better
+    // match; title matches count double, since a term appearing in the
+    // title is a stronger signal than the same term buried in body text)
+    // rather than by the requested sort, which would otherwise silently
+    // stop meaning what its label says the moment a search term is added.
+    const orderBy = isSearch
+      ? 'bm25(archives_fts, 0.0, 2.0, 1.0, 1.0, 1.0) ASC'
+      : q.sort === 'oldest'
         ? 'a.visited_at ASC'
         : q.sort === 'domain'
           ? 'a.domain ASC, a.visited_at DESC'
@@ -207,10 +228,11 @@ export class ArchiveRepo {
       this.db.prepare(`SELECT COUNT(*) as c ${fromClause} ${where}`).get(params) as { c: number }
     ).c;
     const rows = this.db
-      .prepare(`SELECT a.* ${fromClause} ${where} ORDER BY ${orderBy} LIMIT @limit OFFSET @offset`)
-      .all({ ...params, limit, offset }) as ArchiveRow[];
+      .prepare(`SELECT a.*, ${snippetSelect} ${fromClause} ${where} ORDER BY ${orderBy} LIMIT @limit OFFSET @offset`)
+      .all({ ...params, limit, offset }) as (ArchiveRow & { snippet: string | null })[];
 
-    return { items: rows.map(rowToRecord), total };
+    const items: LibraryResultItem[] = rows.map((row) => ({ ...rowToRecord(row), snippet: row.snippet }));
+    return { items, total };
   }
 
   rename(archiveId: string, title: string): void {

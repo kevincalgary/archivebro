@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ArchiveRecord, LibraryQuery } from '../../../shared/types';
+import type { LibraryQuery, LibraryResultItem } from '../../../shared/types';
 import ArchiveCard from './ArchiveCard';
 import ArchiveDetail from './ArchiveDetail';
 import { LoadingPanel, Spinner } from '../Progress';
@@ -15,7 +15,7 @@ export default function LibraryScreen({ onOpenLive }: Props) {
   const [domain, setDomain] = useState('');
   const [status, setStatus] = useState<LibraryQuery['status'] | ''>('');
   const [sort, setSort] = useState<LibraryQuery['sort']>('newest');
-  const [items, setItems] = useState<ArchiveRecord[]>([]);
+  const [items, setItems] = useState<LibraryResultItem[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -70,12 +70,18 @@ export default function LibraryScreen({ onOpenLive }: Props) {
           <option value="skipped-excluded">Skipped (excluded)</option>
           <option value="skipped-private">Skipped (private)</option>
         </select>
-        <select value={sort} onChange={(e) => setSort(e.target.value as LibraryQuery['sort'])}>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="domain">Domain</option>
-          <option value="size">Size</option>
-        </select>
+        {search.trim().length > 0 ? (
+          <span className="library-sort-note" title="Search results are ranked by relevance, not the sort below">
+            Sorted by relevance
+          </span>
+        ) : (
+          <select value={sort} onChange={(e) => setSort(e.target.value as LibraryQuery['sort'])}>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="domain">Domain</option>
+            <option value="size">Size</option>
+          </select>
+        )}
       </div>
 
       <div className="library-meta">

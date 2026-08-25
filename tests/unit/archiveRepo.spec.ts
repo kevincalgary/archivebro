@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { SCHEMA_SQL } from '../../src/main/db/schema';
 import { ArchiveRepo, type NewArchiveInput } from '../../src/main/db/archiveRepo';
+import { SNIPPET_MARK_START, SNIPPET_MARK_END } from '../../src/shared/types';
 
 function makeInput(overrides: Partial<NewArchiveInput> = {}): NewArchiveInput {
   return {
@@ -97,6 +98,44 @@ describe('ArchiveRepo', () => {
     expect(repo.query({ search: 'Widget' }).total).toBe(1);
     expect(repo.query({ search: 'specific phrase' }).total).toBe(1);
     expect(repo.query({ search: 'nonexistent-term-xyz' }).total).toBe(0);
+  });
+
+  it('query() with a search term ranks a title match above a body-only match, even against the sort order', () => {
+    // The title match is visited earliest, and no `sort` is passed (so
+    // the "newest first" default would put it last) -- if search results
+    // still come back oldest-first, ranking isn't actually happening and
+    // this is just falling back to the default sort.
+    const titleMatch = makeInput({
+      title: 'Widget Catalog',
+      canonicalUrl: 'https://example.com/title-match',
+      finalUrl: 'https://example.com/title-match',
+      visitedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const bodyMatch = makeInput({
+      title: 'Unrelated Page',
+      canonicalUrl: 'https://example.com/body-match',
+      finalUrl: 'https://example.com/body-match',
+      visitedAt: '2026-01-05T00:00:00.000Z',
+    });
+    repo.insert(titleMatch);
+    repo.insert(bodyMatch);
+    repo.updateExtractedText(bodyMatch.id, 'this page only mentions widget once, deep in the body text');
+
+    const result = repo.query({ search: 'widget' });
+    expect(result.items.map((i) => i.id)).toEqual([titleMatch.id, bodyMatch.id]);
+  });
+
+  it('query() attaches a snippet with the match marked, only when searching', () => {
+    const input = makeInput({ title: 'Something Else' });
+    repo.insert(input);
+    repo.updateExtractedText(input.id, 'a very specific phrase appears only here in this page');
+
+    const searched = repo.query({ search: 'specific' }).items[0]!;
+    expect(searched.snippet).not.toBeNull();
+    expect(searched.snippet).toContain(`${SNIPPET_MARK_START}specific${SNIPPET_MARK_END}`);
+
+    const browsed = repo.query({}).items[0]!;
+    expect(browsed.snippet).toBeNull();
   });
 
   it('softDelete removes the archive from queries and from the search index', () => {

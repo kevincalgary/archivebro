@@ -1,6 +1,6 @@
 {
   "name": "archive-browser",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A local-first desktop browser that automatically archives every page you visit for offline review.",
   "private": true,
   "main": "dist/main/index.js",
@@ -25,8 +25,10 @@
     "fixtures:serve:site": "node fixtures/siteServer.js",
     "package:mac": "npm run build && electron-builder --mac --dir",
     "package:win": "npm run build && electron-builder --win --dir",
+    "package:linux": "npm run build && electron-builder --linux --dir",
     "package:mac:dist": "npm run build && electron-builder --mac",
     "package:win:dist": "npm run build && electron-builder --win",
+    "package:linux:dist": "npm run build && electron-builder --linux",
     "postinstall": "node node_modules/electron/install.js && electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {

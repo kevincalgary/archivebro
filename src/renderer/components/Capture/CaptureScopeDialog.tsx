@@ -285,6 +285,21 @@ export default function CaptureScopeDialog({ tabId, pageUrl, pageTitle, host, on
                 }
               />
             </label>
+            <label className="field-row">
+              Always include these paths
+              <input
+                type="text"
+                placeholder="/search, /login"
+                value={(custom.allowedNonContentPaths ?? []).join(', ')}
+                onChange={(e) =>
+                  patch({ allowedNonContentPaths: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })
+                }
+              />
+            </label>
+            <p className="settings-note">
+              Sign-in, search, account and similar routes are skipped by default. List any part of a path here (e.g.
+              "/search") to capture matching pages anyway.
+            </p>
             <label className="checkbox-row">
               <input
                 type="checkbox"

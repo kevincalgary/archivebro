@@ -14,7 +14,7 @@ function failure(overrides: Partial<CaptureFailureEntry> = {}): CaptureFailureEn
 
 describe('retryableFailures', () => {
   it('keeps genuine page-capture-attempt failures', () => {
-    const kinds = ['fetch-failed', 'http-error', 'timeout', 'too-large', 'redirect-loop', 'render-failed', 'serialize-failed', 'interrupted'] as const;
+    const kinds = ['fetch-failed', 'http-error', 'timeout', 'too-large', 'redirect-loop', 'render-failed', 'serialize-failed', 'disk-full', 'interrupted'] as const;
     const failures = kinds.map((kind, i) => failure({ kind, url: `https://example.com/${i}` }));
     const result = retryableFailures(failures);
     expect(result.map((f) => f.kind).sort()).toEqual([...kinds].sort());
@@ -52,6 +52,13 @@ describe('retryableFailures', () => {
       failure({ url: 'https://example.com/page', kind: 'fetch-failed' }),
     ];
     expect(retryableFailures(failures)).toHaveLength(1);
+  });
+
+  it('treats a disk-full failure as retryable, once the user has freed up space', () => {
+    const failures = [failure({ url: 'https://example.com/full', kind: 'disk-full', message: 'Ran out of disk space.' })];
+    const result = retryableFailures(failures);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.kind).toBe('disk-full');
   });
 
   it('preserves original order otherwise', () => {

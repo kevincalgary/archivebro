@@ -165,6 +165,71 @@ test.describe('.sitearchive capture', () => {
     });
   });
 
+  // Split into two separate tests (rather than one capturing twice) so each
+  // only runs one crawl -- smaller and easier to isolate under this
+  // environment's memory constraints (see Known Limitations / testing
+  // strategy in the README).
+  test('skips non-content routes by default under Custom scope', async () => {
+    await withSiteFixture(async (site) => {
+      await navigateViaAddressBar(handle, `${site.url}/`);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${site.url}/`);
+
+      // /search (linked from the home page) and /forum/login, /forum/search
+      // (present in the global nav on every page) are all skipped as
+      // non-content, same as any ordinary crawl.
+      const out = path.join(outDir, 'NonContentSkipped.sitearchive');
+      const hooks = siteHooks(handle.app);
+      await hooks.captureSiteToPath(await activeTabId(), siteScope({ kind: 'custom', maxDepth: 2, maxPages: 30 }), out);
+      const result = await hooks.awaitCapture();
+      expect(result).toBeTruthy();
+
+      const archive = await openSiteArchive(out);
+      try {
+        const urls = archive.manifest.pages.map((p) => p.normalizedUrl);
+        expect(urls.some((u) => u.includes('/search'))).toBe(false);
+        expect(urls).not.toContain(`${site.url}/forum/login`);
+        const skipKinds = archive.manifest.failures.filter((f) => f.url.includes('/search')).map((f) => f.kind);
+        expect(skipKinds).toContain('skipped-non-content');
+      } finally {
+        archive.close();
+      }
+    });
+  });
+
+  test('Custom scope allowedNonContentPaths selectively lets a matching route through', async () => {
+    await withSiteFixture(async (site) => {
+      await navigateViaAddressBar(handle, `${site.url}/`);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${site.url}/`);
+
+      // allowedNonContentPaths: ['/search'] should let both /search and
+      // /forum/search through (both paths contain the allowed substring),
+      // while /forum/login -- which does not match the pattern -- stays
+      // skipped, proving the override is selective rather than a blanket
+      // bypass of the whole non-content skip list.
+      const out = path.join(outDir, 'NonContentAllowed.sitearchive');
+      const hooks = siteHooks(handle.app);
+      await hooks.captureSiteToPath(
+        await activeTabId(),
+        siteScope({ kind: 'custom', maxDepth: 2, maxPages: 30, allowedNonContentPaths: ['/search'] }),
+        out,
+      );
+      const result = await hooks.awaitCapture();
+      expect(result).toBeTruthy();
+
+      const archive = await openSiteArchive(out);
+      try {
+        const urls = archive.manifest.pages.map((p) => p.normalizedUrl);
+        expect(urls.some((u) => u.includes('/search') && !u.includes('/forum/'))).toBe(true);
+        expect(urls).toContain(`${site.url}/forum/search`);
+        expect(urls).not.toContain(`${site.url}/forum/login`);
+        const loginSkip = archive.manifest.failures.find((f) => f.url === `${site.url}/forum/login`);
+        expect(loginSkip?.kind).toBe('skipped-non-content');
+      } finally {
+        archive.close();
+      }
+    });
+  });
+
   test('does not follow cross-origin links out of the site', async () => {
     await withSiteFixture(async (site) => {
       await navigateViaAddressBar(handle, `${site.url}/`);

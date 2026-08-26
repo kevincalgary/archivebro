@@ -8,7 +8,7 @@ import type {
   CaptureScope,
 } from '../../shared/sitearchiveTypes';
 import { SCOPE_HARD_LIMITS, MIN_FREE_DISK_BYTES } from '../../shared/sitearchiveTypes';
-import { getDiskSpace } from '../capture/diskSpace';
+import { getDiskSpace, DiskFullError } from '../capture/diskSpace';
 import { sampleCaptureMemory } from '../capture/memoryTelemetry';
 import { SiteArchiveBuilder } from './archiveWriter';
 import { CaptureJournal, type ReplayedCheckpoint } from './captureJournal';
@@ -886,6 +886,21 @@ export class CaptureJob {
       this.emit();
       return { isStart: item.depth === 0, finalUrl };
     } catch (err) {
+      // A write that ran out of disk space (and couldn't recover after
+      // retrying -- see writeWithEnospcRetry) gets its own distinct,
+      // actionable failure kind rather than being lumped in with an
+      // ordinary render failure, so the user understands *why* this page
+      // failed and that it's recoverable by freeing space and using
+      // "Retry failed pages", not a bug in the page itself.
+      if (err instanceof DiskFullError) {
+        await this.recordFailure({
+          url: item.url,
+          kind: 'disk-full',
+          message: `${err.message} Free up disk space, then use "Retry failed pages" to pick this page up again.`,
+          discoveredOn: item.discoveredOn,
+        });
+        return null;
+      }
       await this.recordFailure({
         url: item.url,
         kind: 'render-failed',
@@ -980,7 +995,12 @@ export class CaptureJob {
       // Sign-in flows, search endpoints and (unless opted in) member
       // profiles are not archivable content, and on a link-dense site
       // they crowd out the pages the user actually wanted.
-      if (looksNonContent(absolute, { includeProfiles: isForumScope && this.scope.forumIncludeProfiles === true })) {
+      if (
+        looksNonContent(absolute, {
+          includeProfiles: isForumScope && this.scope.forumIncludeProfiles === true,
+          allowedPaths: this.scope.allowedNonContentPaths,
+        })
+      ) {
         await this.recordSkip({
           url: absolute,
           kind: 'skipped-non-content',

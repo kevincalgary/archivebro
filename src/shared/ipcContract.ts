@@ -24,6 +24,7 @@ const captureScopeSchema = z.object({
   includeMedia: z.boolean(),
   crawlDelayMs: z.number().int().min(0).max(10_000),
   concurrency: z.number().int().min(1).max(6),
+  allowedNonContentPaths: z.array(z.string().max(255)).max(100).optional(),
   forumIncludeProfiles: z.boolean().optional(),
   forumDownloadAttachments: z.boolean().optional(),
   forumAttemptExternalImages: z.boolean().optional(),

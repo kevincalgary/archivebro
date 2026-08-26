@@ -198,11 +198,26 @@ const NON_CONTENT_PARAM_NO_PROFILES_RE = /\b(do|action|mode|view)=(login|registe
 export interface LooksNonContentOptions {
   /** When true, member/profile pages are treated as content -- used by forum-whole captures with "include user profiles" on. */
   includeProfiles?: boolean;
+  /**
+   * Path patterns that let a link through even though it would otherwise
+   * match the non-content skip list -- Custom scope's general escape
+   * hatch (`CaptureScope.allowedNonContentPaths`), checked before either
+   * regex below. Each pattern is matched as a case-insensitive substring
+   * against the URL's pathname (e.g. "/search" matches
+   * "/en/search/results"), the same simple-substring tradeoff
+   * allowedDomains already makes elsewhere in this file -- not a full
+   * glob/regex engine, so a typo fails safe (the link stays skipped)
+   * rather than silently matching everything.
+   */
+  allowedPaths?: readonly string[];
 }
 
 export function looksNonContent(rawUrl: string, options: LooksNonContentOptions = {}): boolean {
   try {
     const u = new URL(rawUrl);
+    if (options.allowedPaths?.some((p) => p.trim() !== '' && u.pathname.toLowerCase().includes(p.trim().toLowerCase()))) {
+      return false;
+    }
     if (options.includeProfiles) {
       return NON_CONTENT_PATH_NO_PROFILES_RE.test(u.pathname) || NON_CONTENT_PARAM_NO_PROFILES_RE.test(u.search);
     }

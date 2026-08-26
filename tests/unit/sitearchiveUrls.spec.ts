@@ -232,4 +232,27 @@ describe('looksNonContent', () => {
   it('does not crash on a malformed URL', () => {
     expect(looksNonContent('not a url')).toBe(false);
   });
+
+  it('lets a link through when it matches an allowedPaths pattern (Custom scope override)', () => {
+    expect(looksNonContent(`${U}/search`, { allowedPaths: ['/search'] })).toBe(false);
+    expect(looksNonContent(`${U}/en/search/results`, { allowedPaths: ['/search'] })).toBe(false);
+    expect(looksNonContent(`${U}/forum/login`, { allowedPaths: ['/login'] })).toBe(false);
+  });
+
+  it('matches allowedPaths case-insensitively and trims whitespace', () => {
+    expect(looksNonContent(`${U}/Search`, { allowedPaths: ['  /SEARCH  '] })).toBe(false);
+  });
+
+  it('only overrides the specific pattern given, not the whole skip list', () => {
+    // Allowing /search back in must not accidentally let /login through too.
+    expect(looksNonContent(`${U}/login`, { allowedPaths: ['/search'] })).toBe(true);
+  });
+
+  it('ignores blank/empty allowedPaths entries rather than matching everything', () => {
+    expect(looksNonContent(`${U}/login`, { allowedPaths: ['', '   '] })).toBe(true);
+  });
+
+  it('has no effect when the path was not going to be skipped anyway', () => {
+    expect(looksNonContent(`${U}/research`, { allowedPaths: ['/search'] })).toBe(false);
+  });
 });

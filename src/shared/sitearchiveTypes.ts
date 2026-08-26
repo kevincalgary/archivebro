@@ -55,6 +55,19 @@ export interface CaptureScope {
   /** Number of pages fetched in parallel. Kept deliberately low. */
   concurrency: number;
   /**
+   * Path patterns that let a link through `looksNonContent()`'s hardcoded
+   * skip list (login/search/account/etc.) even though it would otherwise
+   * match -- the general Custom-scope equivalent of `forumIncludeProfiles`
+   * below, which only ever covers one specific case (member profiles) on
+   * forum-* scopes. Absent/undefined behaves exactly like an empty array.
+   * Matched as a case-insensitive substring against the URL's pathname
+   * (see `looksNonContent` in urlNormalize.ts) -- deliberately simple
+   * rather than a full glob/regex engine, the same tradeoff allowedDomains
+   * already makes: a typo fails safe (the link stays skipped) instead of
+   * silently matching everything.
+   */
+  allowedNonContentPaths?: string[];
+  /**
    * Forum-only toggles, consulted when `kind` is one of the `forum-*`
    * kinds. Absent/undefined is treated the same as the documented default
    * for non-forum scopes and for archives captured before these existed.
@@ -258,6 +271,8 @@ export type CaptureFailureKind =
   | 'redirect-loop'
   | 'render-failed'
   | 'serialize-failed'
+  /** A write ran out of disk space (ENOSPC), even after retrying -- recoverable by freeing space and using "Retry failed pages". */
+  | 'disk-full'
   | 'cancelled'
   /** Dequeued for capture, then the process died before recording any outcome. */
   | 'interrupted';

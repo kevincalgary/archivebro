@@ -64,6 +64,7 @@ export class CaptureManager {
       crawlDelayMs: Math.max(0, Math.min(scope.crawlDelayMs, 10_000)),
       allowedDomains: scope.allowedDomains.slice(0, 100),
       includeExternalDomains: scope.includeExternalDomains.slice(0, 100),
+      ...(scope.allowedNonContentPaths ? { allowedNonContentPaths: scope.allowedNonContentPaths.slice(0, 100) } : {}),
     };
   }
 

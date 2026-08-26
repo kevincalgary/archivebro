@@ -24,6 +24,7 @@ import {
 } from './crawler';
 import { normalizeUrl, originOf } from './urlNormalize';
 import { threadKeyOf } from './forumLinks';
+import { DiskFullError } from '../capture/diskSpace';
 import { logger } from '../util/logger';
 
 export type ProgressListener = (progress: CaptureProgress) => void;
@@ -44,6 +45,7 @@ const RETRYABLE_PAGE_FAILURE_KINDS: ReadonlySet<CaptureFailureKind> = new Set([
   'redirect-loop',
   'render-failed',
   'serialize-failed',
+  'disk-full',
   'interrupted',
 ]);
 
@@ -460,6 +462,19 @@ export class RetryJob {
       this.bytesDownloaded += result.bytesDownloaded;
       this.warningCount += result.warnings.length;
     } catch (err) {
+      // Same distinct kind capturePageSafely (crawler.ts) records for a
+      // fresh crawl -- a page that's still failing on retry because the
+      // disk is (still) full should say so, not look like an ordinary
+      // render failure.
+      if (err instanceof DiskFullError) {
+        await builder.addFailure({
+          url: failure.url,
+          kind: 'disk-full',
+          message: `${err.message} Free up disk space and retry again.`,
+          discoveredOn: failure.discoveredOn,
+        });
+        return;
+      }
       await builder.addFailure({
         url: failure.url,
         kind: 'render-failed',

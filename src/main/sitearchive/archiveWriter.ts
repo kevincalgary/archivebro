@@ -18,6 +18,7 @@ import type {
 } from '../../shared/sitearchiveTypes';
 import { SITEARCHIVE_FORMAT_VERSION } from '../../shared/sitearchiveTypes';
 import { logger } from '../util/logger';
+import { writeWithEnospcRetry } from '../capture/diskSpace';
 import { hostOf } from './urlNormalize';
 import {
   CHECKPOINT_JOURNAL_FILE,
@@ -594,7 +595,7 @@ export class SiteArchiveBuilder {
     const writePromise = (async (): Promise<ArchivedAssetEntry> => {
       const ext = extensionForContentType(contentType);
       const relPath = `assets/${hash}.${ext}`;
-      await fs.writeFile(path.join(this.requireStaging(), relPath), data);
+      await writeWithEnospcRetry(() => fs.writeFile(path.join(this.requireStaging(), relPath), data));
       this.totalUncompressed += data.length;
 
       const entry: ArchivedAssetEntry = {
@@ -631,7 +632,7 @@ export class SiteArchiveBuilder {
 
     const writePromise = (async (): Promise<ArchivedResponseEntry> => {
       const relPath = `responses/${hash}.json`;
-      await fs.writeFile(path.join(this.requireStaging(), relPath), data);
+      await writeWithEnospcRetry(() => fs.writeFile(path.join(this.requireStaging(), relPath), data));
       this.totalUncompressed += data.length;
 
       const entry: ArchivedResponseEntry = {
@@ -675,14 +676,14 @@ export class SiteArchiveBuilder {
     const staging = this.requireStaging();
     const htmlBuf = Buffer.from(input.html, 'utf8');
     const htmlPath = `pages/${input.pageId}.html`;
-    await fs.writeFile(path.join(staging, htmlPath), htmlBuf);
+    await writeWithEnospcRetry(() => fs.writeFile(path.join(staging, htmlPath), htmlBuf));
     this.totalUncompressed += htmlBuf.length;
 
     let screenshotPath: string | null = null;
     let screenshotSha: string | null = null;
     if (input.screenshot) {
       screenshotPath = `screenshots/${input.pageId}.png`;
-      await fs.writeFile(path.join(staging, screenshotPath), input.screenshot);
+      await writeWithEnospcRetry(() => fs.writeFile(path.join(staging, screenshotPath!), input.screenshot!));
       screenshotSha = sha256(input.screenshot);
       this.totalUncompressed += input.screenshot.length;
     }
@@ -692,7 +693,7 @@ export class SiteArchiveBuilder {
     if (input.text !== null) {
       const textBuf = Buffer.from(input.text, 'utf8');
       textPath = `pages/${input.pageId}.txt`;
-      await fs.writeFile(path.join(staging, textPath), textBuf);
+      await writeWithEnospcRetry(() => fs.writeFile(path.join(staging, textPath!), textBuf));
       textSha = sha256(textBuf);
       this.totalUncompressed += textBuf.length;
     }
@@ -750,7 +751,7 @@ export class SiteArchiveBuilder {
 
     const staging = this.requireStaging();
     const fileId = sha256(entry.postId);
-    await fs.writeFile(path.join(staging, 'posts', `${fileId}.txt`), bodyText, 'utf8');
+    await writeWithEnospcRetry(() => fs.writeFile(path.join(staging, 'posts', `${fileId}.txt`), bodyText, 'utf8'));
     this.totalUncompressed += Buffer.byteLength(bodyText, 'utf8');
     this.forumPosts.push(entry);
     await this.journal?.append({ t: 'forumPost', e: entry });

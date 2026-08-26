@@ -18,7 +18,13 @@
 export const SITEARCHIVE_FORMAT_VERSION = 1;
 export const SITEARCHIVE_EXTENSION = 'sitearchive';
 
-export type CaptureScopeKind = 'current-page' | 'entire-site' | 'custom';
+export type CaptureScopeKind =
+  | 'current-page'
+  | 'entire-site'
+  | 'custom'
+  | 'forum-thread'
+  | 'forum-section'
+  | 'forum-whole';
 
 /**
  * `null` on a limit means "no limit".
@@ -48,6 +54,17 @@ export interface CaptureScope {
   crawlDelayMs: number;
   /** Number of pages fetched in parallel. Kept deliberately low. */
   concurrency: number;
+  /**
+   * Forum-only toggles, consulted when `kind` is one of the `forum-*`
+   * kinds. Absent/undefined is treated the same as the documented default
+   * for non-forum scopes and for archives captured before these existed.
+   */
+  /** Follow links to member/author profile pages. Off by default -- profiles balloon a capture without being thread content. */
+  forumIncludeProfiles?: boolean;
+  /** Download linked attachments (files without a browser-rendered preview) as assets. */
+  forumDownloadAttachments?: boolean;
+  /** Fetch images hosted on a different origin than the forum itself. */
+  forumAttemptExternalImages?: boolean;
 }
 
 export const DEFAULT_CAPTURE_SCOPE: CaptureScope = {
@@ -81,6 +98,37 @@ export const UNLIMITED_SITE_SCOPE: CaptureScope = {
   maxDepth: null,
   maxPages: null,
   maxTotalBytes: null,
+};
+
+/** Default forum toggles, shared by all three forum-flavored presets below. */
+const DEFAULT_FORUM_TOGGLES = {
+  forumIncludeProfiles: false,
+  forumDownloadAttachments: true,
+  forumAttemptExternalImages: true,
+};
+
+export const DEFAULT_FORUM_THREAD_SCOPE: CaptureScope = {
+  ...DEFAULT_CAPTURE_SCOPE,
+  ...DEFAULT_FORUM_TOGGLES,
+  kind: 'forum-thread',
+  maxDepth: null,
+  maxPages: 500,
+};
+
+export const DEFAULT_FORUM_SECTION_SCOPE: CaptureScope = {
+  ...DEFAULT_CAPTURE_SCOPE,
+  ...DEFAULT_FORUM_TOGGLES,
+  kind: 'forum-section',
+  maxDepth: null,
+  maxPages: 2000,
+};
+
+export const DEFAULT_FORUM_WHOLE_SCOPE: CaptureScope = {
+  ...DEFAULT_CAPTURE_SCOPE,
+  ...DEFAULT_FORUM_TOGGLES,
+  kind: 'forum-whole',
+  maxDepth: 12,
+  maxPages: 20_000,
 };
 
 /** Hard ceilings the UI requires explicit confirmation to exceed. */
@@ -130,6 +178,12 @@ export interface ArchivedPageEntry {
   redirectedFrom: string[];
   contentType: string;
   byteSize: number;
+  /** Set only for pages captured under a forum-* scope. Identity of the thread this page belongs to, shared across every page of that thread's pagination. */
+  forumThreadKey?: string;
+  /** Identity of the forum section this page belongs to, when known. */
+  forumSectionKey?: string;
+  /** 1-based position of this page within its thread's pagination, when known. */
+  forumPageIndex?: number;
 }
 
 export type AssetKind = 'stylesheet' | 'image' | 'font' | 'script' | 'media' | 'document' | 'other';
@@ -195,6 +249,10 @@ export type CaptureFailureKind =
   | 'skipped-non-content'
   /** A resource whose fetch was abandoned because the page's time budget ran out. */
   | 'skipped-budget'
+  /** A link that isn't part of the selected forum scope (e.g. another thread, outside a "current thread" capture). */
+  | 'skipped-out-of-forum-scope'
+  /** An attachment link found, but `forumDownloadAttachments` was off. */
+  | 'skipped-attachment-excluded'
   /** The crawl hit a scope limit with pages still queued. */
   | 'stopped-at-limit'
   | 'redirect-loop'
@@ -221,6 +279,39 @@ export interface RouteMapEntry {
   target: { type: 'page'; pageId: string } | { type: 'asset'; sha256: string } | { type: 'response'; sha256: string };
 }
 
+/**
+ * One forum post, extracted best-effort from a page captured under a
+ * forum-* scope. Detection is heuristic (see forumPageScript.ts) -- a page
+ * with no recognizable post markup simply contributes zero entries here
+ * and is still indexed at whole-page granularity via pages_fts, so search
+ * never silently loses coverage.
+ */
+export interface ForumPostEntry {
+  /** Stable id, derived from the page + the post's in-page anchor. */
+  postId: string;
+  pageId: string;
+  /** Element id inside the captured page this post can be scrolled to, e.g. "post-123". */
+  anchor: string;
+  author: string | null;
+  authorProfileUrl: string | null;
+  /** ISO timestamp when recoverable from a <time datetime> attribute, else null. */
+  timestamp: string | null;
+  postNumber: number | null;
+  threadKey: string;
+  sectionKey: string | null;
+  threadTitle: string;
+  sectionTitle: string | null;
+}
+
+/** Aggregate forum stats, present only on archives captured under a forum-* scope. */
+export interface ForumCaptureSummary {
+  sectionCount: number;
+  threadCount: number;
+  postCount: number;
+  attachmentCount: number;
+  profileCount: number;
+}
+
 export interface SiteArchiveManifest {
   formatVersion: number;
   archiveId: string;
@@ -242,6 +333,9 @@ export interface SiteArchiveManifest {
   /** Zip path + hash of the SQLite catalog, when present. */
   indexPath: string | null;
   indexSha256: string | null;
+  /** Present only when scope.kind was a forum-* kind. */
+  forumPosts?: ForumPostEntry[];
+  forumSummary?: ForumCaptureSummary;
 }
 
 // --- Live capture progress (main -> renderer) ---
@@ -262,6 +356,10 @@ export interface CaptureProgress {
   bytesDownloaded: number;
   warningCount: number;
   failureCount: number;
+  /** Threads captured so far, under a forum-* scope. Undefined for non-forum captures. */
+  threadsSaved?: number;
+  /** Images/attachments/other non-page assets saved so far. Undefined for non-forum captures. */
+  imagesSaved?: number;
   /** Populated once state is 'completed'. */
   result?: CaptureResult;
   /** Populated when state is 'failed'. */
@@ -274,6 +372,7 @@ export interface CaptureResult {
   assetCount: number;
   fileSizeBytes: number;
   failures: CaptureFailureEntry[];
+  forumSummary?: ForumCaptureSummary;
 }
 
 /**
@@ -320,4 +419,45 @@ export interface SiteArchiveSearchResult {
   normalizedUrl: string;
   /** Plain text excerpt around the match, truncated -- no markup, safe to render as-is. */
   snippet: string;
+  /** Element id to scroll to on the destination page, when the match is anchor-addressable. */
+  anchor?: string;
+}
+
+/** One match from searching forum posts inside an open .sitearchive (see OpenedArchive.searchForumPosts()). */
+export interface ForumPostSearchResult {
+  postId: string;
+  pageId: string;
+  anchor: string;
+  author: string | null;
+  threadTitle: string;
+  sectionTitle: string | null;
+  normalizedUrl: string;
+  /** Plain text excerpt around the match, truncated -- no markup, safe to render as-is. */
+  snippet: string;
+}
+
+/**
+ * One row of the app-wide, persistent registry of completed `.sitearchive`
+ * captures -- separate from the single-page auto-capture Library, since a
+ * `.sitearchive` is a portable multi-page file with its own summary shape.
+ * See siteArchiveHistoryRepo.ts.
+ */
+export interface SiteArchiveHistoryEntry {
+  archiveId: string;
+  outputPath: string;
+  siteTitle: string;
+  startUrl: string;
+  scopeKind: CaptureScopeKind;
+  capturedAt: string;
+  pageCount: number;
+  assetCount: number;
+  fileSizeBytes: number;
+  threadCount: number | null;
+  sectionCount: number | null;
+  attachmentCount: number | null;
+  isComplete: boolean;
+  incompleteReason: string | null;
+  failureCount: number;
+  /** False when `outputPath` no longer exists on disk -- the UI offers Remove instead of Open/Reveal. */
+  fileExists: boolean;
 }

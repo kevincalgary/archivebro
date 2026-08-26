@@ -1,18 +1,20 @@
 import type { ElectronApplication } from '@playwright/test';
 import { startSiteFixtureServer } from '../../fixtures/siteServer';
 import type { CaptureProgress, CaptureResult, CaptureScope } from '../../src/shared/sitearchiveTypes';
-import { DEFAULT_CAPTURE_SCOPE, DEFAULT_SITE_SCOPE } from '../../src/shared/sitearchiveTypes';
+import { DEFAULT_CAPTURE_SCOPE, DEFAULT_SITE_SCOPE, DEFAULT_FORUM_THREAD_SCOPE, DEFAULT_FORUM_SECTION_SCOPE, DEFAULT_FORUM_WHOLE_SCOPE } from '../../src/shared/sitearchiveTypes';
 import { testHooks } from './helpers';
 
 export interface SiteFixture {
   url: string;
   close: () => void;
   getRequestLog: () => Array<{ method: string; url: string }>;
+  /** A genuinely externally-hosted image, served from a second real origin -- see startExternalImageServer in siteServer.js. */
+  externalImageUrl: string;
 }
 
 export async function withSiteFixture<T>(fn: (fixture: SiteFixture) => Promise<T>): Promise<T> {
-  const { server, url, getRequestLog } = await startSiteFixtureServer();
-  const fixture: SiteFixture = { url, close: () => server.close(), getRequestLog };
+  const { server, url, externalImageUrl, getRequestLog } = await startSiteFixtureServer();
+  const fixture: SiteFixture = { url, close: () => server.close(), getRequestLog, externalImageUrl };
   try {
     return await fn(fixture);
   } finally {
@@ -63,6 +65,18 @@ export function currentPageScope(overrides: Partial<CaptureScope> = {}): Capture
 
 export function siteScope(overrides: Partial<CaptureScope> = {}): CaptureScope {
   return { ...DEFAULT_SITE_SCOPE, crawlDelayMs: 0, ...overrides };
+}
+
+export function forumThreadScope(overrides: Partial<CaptureScope> = {}): CaptureScope {
+  return { ...DEFAULT_FORUM_THREAD_SCOPE, crawlDelayMs: 0, ...overrides };
+}
+
+export function forumSectionScope(overrides: Partial<CaptureScope> = {}): CaptureScope {
+  return { ...DEFAULT_FORUM_SECTION_SCOPE, crawlDelayMs: 0, ...overrides };
+}
+
+export function forumWholeScope(overrides: Partial<CaptureScope> = {}): CaptureScope {
+  return { ...DEFAULT_FORUM_WHOLE_SCOPE, crawlDelayMs: 0, ...overrides };
 }
 
 /** Extra sitearchive-specific hooks layered on the shared testHooks(). */

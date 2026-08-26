@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { CaptureProgress } from '../../../shared/sitearchiveTypes';
 import { ProgressBar, Spinner } from '../Progress';
 import { useDialogA11y } from '../../hooks/useDialogA11y';
+import { scopeLabel } from './scopeLabels';
 
 interface Props {
   progress: CaptureProgress;
@@ -20,12 +21,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
-
-const SCOPE_LABEL: Record<string, string> = {
-  'current-page': 'Current page only',
-  'entire-site': 'Entire website',
-  custom: 'Custom scope',
-};
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -105,7 +100,7 @@ export default function CaptureProgressDialog({
         <div className="capture-target">
           <div className="capture-target-title">{progress.siteTitle || progress.startUrl}</div>
           <div className="capture-target-url">{progress.startUrl}</div>
-          <div className="capture-scope-label">{SCOPE_LABEL[progress.scopeKind] ?? progress.scopeKind}</div>
+          <div className="capture-scope-label">{scopeLabel(progress.scopeKind)}</div>
         </div>
 
         {/* One progress section in a fixed position, so the bar doesn't
@@ -157,12 +152,24 @@ export default function CaptureProgressDialog({
             <dt>Downloaded</dt>
             <dd>{formatBytes(progress.bytesDownloaded)}</dd>
           </div>
+          {progress.threadsSaved !== undefined && (
+            <div>
+              <dt>Threads saved</dt>
+              <dd>{progress.threadsSaved}</dd>
+            </div>
+          )}
+          {progress.imagesSaved !== undefined && (
+            <div>
+              <dt>Images/files saved</dt>
+              <dd>{progress.imagesSaved}</dd>
+            </div>
+          )}
           <div>
             <dt>Warnings</dt>
             <dd>{progress.warningCount}</dd>
           </div>
           <div>
-            <dt>Failures</dt>
+            <dt>Failures/skips</dt>
             <dd>{progress.failureCount}</dd>
           </div>
         </dl>
@@ -187,10 +194,26 @@ export default function CaptureProgressDialog({
 
         {result && (
           <div className="capture-result">
+            {(() => {
+              const stopReason = result.failures.find((f) => f.kind === 'stopped-at-limit');
+              return stopReason ? (
+                <div className="over-limit-warning" role="status">
+                  <strong>Incomplete:</strong> {stopReason.message}
+                </div>
+              ) : null;
+            })()}
             <div className="capture-result-row">
               <strong>{result.pageCount}</strong> pages, <strong>{result.assetCount}</strong> assets,{' '}
               <strong>{formatBytes(result.fileSizeBytes)}</strong>
             </div>
+            {result.forumSummary && (
+              <div className="capture-result-row">
+                <strong>{result.forumSummary.threadCount}</strong> threads across{' '}
+                <strong>{result.forumSummary.sectionCount}</strong> section{result.forumSummary.sectionCount === 1 ? '' : 's'},{' '}
+                <strong>{result.forumSummary.postCount}</strong> posts, <strong>{result.forumSummary.attachmentCount}</strong>{' '}
+                attachment{result.forumSummary.attachmentCount === 1 ? '' : 's'}
+              </div>
+            )}
             <div className="capture-result-path" title={result.archivePath}>
               {result.archivePath}
             </div>

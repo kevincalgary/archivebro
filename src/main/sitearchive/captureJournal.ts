@@ -6,6 +6,7 @@ import type {
   ArchivedResponseEntry,
   CaptureFailureEntry,
   CaptureScope,
+  ForumPostEntry,
   RouteMapEntry,
 } from '../../shared/sitearchiveTypes';
 import { logger } from '../util/logger';
@@ -70,6 +71,7 @@ export type JournalRecord =
   | { t: 'assetUrl'; sha: string; url: string }
   | { t: 'response'; e: ArchivedResponseEntry }
   | { t: 'route'; e: RouteMapEntry }
+  | { t: 'forumPost'; e: ForumPostEntry }
   | { t: 'failure'; e: CaptureFailureEntry }
   /** A URL admitted to the crawl queue. */
   | { t: 'enq'; url: string; norm: string; depth: number; on: string | null }
@@ -90,6 +92,7 @@ export interface ReplayedCheckpoint {
   assets: Map<string, ArchivedAssetEntry>;
   responses: Map<string, ArchivedResponseEntry>;
   routes: Map<string, RouteMapEntry>;
+  forumPosts: ForumPostEntry[];
   failures: CaptureFailureEntry[];
   queue: ReplayedQueueItem[];
   queuedOrDone: Set<string>;
@@ -253,6 +256,7 @@ export async function replayCheckpoint(stagingDir: string): Promise<ReplayedChec
     assets: new Map(),
     responses: new Map(),
     routes: new Map(),
+    forumPosts: [],
     failures: [],
     queue: [],
     queuedOrDone: new Set(),
@@ -354,6 +358,9 @@ function applyRecord(
       break;
     case 'route':
       state.routes.set(record.e.normalizedUrl, record.e);
+      break;
+    case 'forumPost':
+      state.forumPosts.push(record.e);
       break;
     case 'failure':
       state.failures.push(record.e);

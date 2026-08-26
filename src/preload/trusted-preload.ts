@@ -15,8 +15,10 @@ import type {
 import type {
   CaptureProgress,
   CaptureScope,
+  ForumPostSearchResult,
   OpenedSiteArchive,
   RecoverableCaptureSummary,
+  SiteArchiveHistoryEntry,
   SiteArchiveSearchResult,
 } from '../shared/sitearchiveTypes';
 
@@ -90,8 +92,17 @@ const api = {
     }): Promise<{ resolved: boolean }> => ipcRenderer.invoke(Channels.permissionRespond, input),
   },
   siteCapture: {
-    estimate: (tabId: string): Promise<{ url: string; title: string; host: string; canCapture: boolean; isBusy: boolean }> =>
-      ipcRenderer.invoke(Channels.siteCaptureEstimate, { tabId }),
+    estimate: (
+      tabId: string,
+      forScopeKind?: 'forum-thread' | 'forum-section' | 'forum-whole',
+    ): Promise<{
+      url: string;
+      title: string;
+      host: string;
+      canCapture: boolean;
+      isBusy: boolean;
+      forumEstimate?: { estimatedThreads: number | null; note: string };
+    }> => ipcRenderer.invoke(Channels.siteCaptureEstimate, { tabId, forScopeKind }),
     start: (tabId: string, scope: CaptureScope): Promise<{ started: boolean; jobId?: string; outputPath?: string }> =>
       ipcRenderer.invoke(Channels.siteCaptureStart, { tabId, scope }),
     pause: (jobId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(Channels.siteCapturePause, { jobId }),
@@ -121,8 +132,17 @@ const api = {
       ipcRenderer.invoke(Channels.siteArchiveConfirmExternal, { url }),
     search: (tabId: string, query: string): Promise<SiteArchiveSearchResult[]> =>
       ipcRenderer.invoke(Channels.siteArchiveSearch, { tabId, query }),
-    navigateToPage: (tabId: string, pageId: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke(Channels.siteArchiveNavigateToPage, { tabId, pageId }),
+    searchForumPosts: (tabId: string, query: string): Promise<ForumPostSearchResult[]> =>
+      ipcRenderer.invoke(Channels.siteArchiveSearchForumPosts, { tabId, query }),
+    navigateToPage: (tabId: string, pageId: string, anchor?: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(Channels.siteArchiveNavigateToPage, { tabId, pageId, anchor }),
+  },
+  siteArchiveHistory: {
+    list: (): Promise<SiteArchiveHistoryEntry[]> => ipcRenderer.invoke(Channels.siteArchiveHistoryList),
+    remove: (archiveId: string): Promise<{ removed: boolean }> =>
+      ipcRenderer.invoke(Channels.siteArchiveHistoryRemove, { archiveId }),
+    reveal: (archiveId: string): Promise<{ revealed: boolean }> =>
+      ipcRenderer.invoke(Channels.siteArchiveHistoryReveal, { archiveId }),
   },
   updates: {
     checkNow: (): Promise<UpdateStatus> => ipcRenderer.invoke(Channels.updatesCheckNow),

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { TabState } from '../../shared/types';
-import type { SiteArchiveSearchResult } from '../../shared/sitearchiveTypes';
+import type { SiteArchiveSearchResult, ForumPostSearchResult } from '../../shared/sitearchiveTypes';
 import type { Screen } from '../state/store';
 import CaptureIndicator from './CaptureIndicator';
 import { Spinner } from './Progress';
@@ -17,6 +17,7 @@ interface Props {
   onNewPrivateTab: () => void;
   onToggleArchivePaused: () => void;
   onOpenLibrary: () => void;
+  onOpenSiteArchives: () => void;
   onOpenSettings: () => void;
   onCapturePage: () => void;
   captureBusy: boolean;
@@ -34,6 +35,7 @@ export default function Toolbar({
   onNewPrivateTab,
   onToggleArchivePaused,
   onOpenLibrary,
+  onOpenSiteArchives,
   onOpenSettings,
   onCapturePage,
   captureBusy,
@@ -59,6 +61,7 @@ export default function Toolbar({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SiteArchiveSearchResult[]>([]);
+  const [forumPostResults, setForumPostResults] = useState<ForumPostSearchResult[]>([]);
   const tabId = tab?.id;
   const searchToggleRef = useRef<HTMLButtonElement>(null);
 
@@ -76,17 +79,26 @@ export default function Toolbar({
     setSearchOpen(false);
     setSearchQuery('');
     setSearchResults([]);
+    setForumPostResults([]);
   }, [tabId]);
 
   useEffect(() => {
     if (!searchOpen || !tabId || !searchQuery.trim()) {
       setSearchResults([]);
+      setForumPostResults([]);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(() => {
       void window.archiveBrowser.siteArchive.search(tabId, searchQuery).then((results) => {
         if (!cancelled) setSearchResults(results);
+      });
+      // Forum post search is a distinct FTS table (author/thread/section
+      // metadata, post-granularity body text) -- see forum_posts_fts in
+      // archiveWriter.ts. Empty on a non-forum archive, so this is safe
+      // to always call.
+      void window.archiveBrowser.siteArchive.searchForumPosts(tabId, searchQuery).then((results) => {
+        if (!cancelled) setForumPostResults(results);
       });
     }, 200);
     return () => {
@@ -95,9 +107,9 @@ export default function Toolbar({
     };
   }, [searchOpen, tabId, searchQuery]);
 
-  async function goToSearchResult(pageId: string) {
+  async function goToSearchResult(pageId: string, anchor?: string) {
     if (!tabId) return;
-    await window.archiveBrowser.siteArchive.navigateToPage(tabId, pageId);
+    await window.archiveBrowser.siteArchive.navigateToPage(tabId, pageId, anchor);
     setSearchOpen(false);
     setSearchQuery('');
   }
@@ -167,6 +179,25 @@ export default function Toolbar({
                   if (e.key === 'Escape') closeSearch();
                 }}
               />
+              {forumPostResults.length > 0 && (
+                <ul className="sitearchive-search-results sitearchive-search-results-posts">
+                  {forumPostResults.map((r) => (
+                    <li key={r.postId}>
+                      <button
+                        className="sitearchive-search-result"
+                        onClick={() => void goToSearchResult(r.pageId, r.anchor)}
+                      >
+                        <span className="sitearchive-search-result-title">
+                          {r.threadTitle}
+                          {r.sectionTitle ? ` · ${r.sectionTitle}` : ''}
+                        </span>
+                        {r.author && <span className="sitearchive-search-result-author">by {r.author}</span>}
+                        {r.snippet && <span className="sitearchive-search-result-snippet">{r.snippet}</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {searchResults.length > 0 && (
                 <ul className="sitearchive-search-results">
                   {searchResults.map((r) => (
@@ -179,7 +210,7 @@ export default function Toolbar({
                   ))}
                 </ul>
               )}
-              {searchQuery.trim().length > 0 && searchResults.length === 0 && (
+              {searchQuery.trim().length > 0 && searchResults.length === 0 && forumPostResults.length === 0 && (
                 <p className="sitearchive-search-empty">No matches in this archive.</p>
               )}
             </div>
@@ -213,6 +244,9 @@ export default function Toolbar({
       </button>
       <button onClick={onOpenLibrary} title="Library (Cmd/Ctrl+Shift+L)">
         📚 Library
+      </button>
+      <button onClick={onOpenSiteArchives} title="Saved sites and forums">
+        🗂 Saved Sites
       </button>
       <button onClick={onOpenSettings} aria-label="Settings" title="Settings (Cmd/Ctrl+,)">
         ⚙

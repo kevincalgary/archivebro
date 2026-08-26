@@ -193,11 +193,12 @@ export class TabManager {
    * supplied pageId being pointed at the wrong tab, even though pageId
    * itself is just a UUID looked up server-side by whoever calls this.
    */
-  navigateSiteArchiveTab(tabId: string, archiveId: string, pageId: string): boolean {
+  navigateSiteArchiveTab(tabId: string, archiveId: string, pageId: string, anchor?: string): boolean {
     const tab = this.tabs.get(tabId);
     if (!tab || tab.kind !== 'sitearchive' || tab.offlineArchiveId !== archiveId) return false;
     if (tab.view.webContents.isDestroyed()) return false;
-    void tab.view.webContents.loadURL(`${ARCHIVE_SITE_SCHEME}://${archiveId}/page/${pageId}`);
+    const fragment = anchor ? `#${anchor}` : '';
+    void tab.view.webContents.loadURL(`${ARCHIVE_SITE_SCHEME}://${archiveId}/page/${pageId}${fragment}`);
     return true;
   }
 
@@ -207,6 +208,47 @@ export class TabManager {
 
   onSiteArchiveExternalLink(listener: (url: string) => void): void {
     this.externalLinkListeners.push(listener);
+  }
+
+/**
+   * A rough, best-effort pre-flight for a forum-section/forum-whole
+   * capture, run against the tab's *already-rendered* page rather than a
+   * fresh hidden-view load -- the user is looking at this exact page when
+   * they open the capture dialog, so its DOM is already there for free.
+   * Counts distinct same-origin links that don't look like pagination,
+   * navigation chrome, or account/utility routes, as a proxy for "threads
+   * reachable from here". Always an approximation: a forum with more
+   * threads than fit on one rendered index page, or one that loads more
+   * via infinite scroll, will undercount. Never throws -- returns null on
+   * any failure, which the caller renders as "estimate unavailable".
+   */
+  async estimateForumLinkCount(tabId: string): Promise<number | null> {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.view.webContents.isDestroyed()) return null;
+    try {
+      const count = await tab.view.webContents.executeJavaScript(
+        `(function () {
+          try {
+            var origin = location.origin;
+            var seen = {};
+            var anchors = document.querySelectorAll('a[href]');
+            for (var i = 0; i < anchors.length; i++) {
+              var href = anchors[i].getAttribute('href');
+              if (!href) continue;
+              var abs;
+              try { abs = new URL(href, document.baseURI).href; } catch (e) { continue; }
+              if (abs.indexOf(origin) !== 0) continue;
+              seen[abs] = true;
+            }
+            return Object.keys(seen).length;
+          } catch (e) { return null; }
+        })()`,
+        true,
+      );
+      return typeof count === 'number' && Number.isFinite(count) ? count : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

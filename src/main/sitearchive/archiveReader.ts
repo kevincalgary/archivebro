@@ -4,7 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import yauzl from 'yauzl';
 import Database from 'better-sqlite3';
-import type { SiteArchiveManifest, RouteMapEntry, SiteArchiveSearchResult } from '../../shared/sitearchiveTypes';
+import type { SiteArchiveManifest, RouteMapEntry, SiteArchiveSearchResult, ForumPostSearchResult } from '../../shared/sitearchiveTypes';
 import { SITEARCHIVE_FORMAT_VERSION } from '../../shared/sitearchiveTypes';
 import { logger } from '../util/logger';
 import { sanitizeFtsQuery } from '../util/ftsQuery';
@@ -227,6 +227,62 @@ export class OpenedArchive {
       // A malformed query or corrupt index shouldn't break browsing --
       // search just comes back empty.
       logger.warn('sitearchive.search_failed', { error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * Full-text search over forum posts (see forum_posts_fts in
+   * archiveWriter.ts's writeIndexDatabase). Empty on a non-forum archive,
+   * or on any archive predating this table -- same graceful degradation
+   * as search() on a missing/corrupt catalog.
+   */
+  searchForumPosts(query: string, limit = 30): ForumPostSearchResult[] {
+    if (!this.indexDb) return [];
+    const q = sanitizeFtsQuery(query.trim());
+    if (!q) return [];
+
+    try {
+      const rows = this.indexDb
+        .prepare(
+          `SELECT post_id, snippet(forum_posts_fts, 5, '', '', '…', 12) AS snippet
+           FROM forum_posts_fts WHERE forum_posts_fts MATCH ? ORDER BY rank LIMIT ?`,
+        )
+        .all(q, limit) as Array<{ post_id: string; snippet: string }>;
+
+      const postRows = this.indexDb
+        .prepare(
+          `SELECT post_id, page_id, anchor, author, thread_title, section_title FROM forum_posts WHERE post_id IN (${rows.map(() => '?').join(',') || "''"})`,
+        )
+        .all(...rows.map((r) => r.post_id)) as Array<{
+        post_id: string;
+        page_id: string;
+        anchor: string;
+        author: string | null;
+        thread_title: string;
+        section_title: string | null;
+      }>;
+      const postById = new Map(postRows.map((p) => [p.post_id, p]));
+
+      const results: ForumPostSearchResult[] = [];
+      for (const row of rows) {
+        const post = postById.get(row.post_id);
+        const page = post ? this.pageById.get(post.page_id) : undefined;
+        if (!post || !page) continue; // stale row from a mismatched catalog -- skip rather than throw
+        results.push({
+          postId: post.post_id,
+          pageId: post.page_id,
+          anchor: post.anchor,
+          author: post.author,
+          threadTitle: post.thread_title,
+          sectionTitle: post.section_title,
+          normalizedUrl: page.normalizedUrl,
+          snippet: row.snippet,
+        });
+      }
+      return results;
+    } catch (err) {
+      logger.warn('sitearchive.forum_search_failed', { error: err instanceof Error ? err.message : String(err) });
       return [];
     }
   }

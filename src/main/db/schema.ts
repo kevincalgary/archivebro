@@ -58,4 +58,29 @@ CREATE TABLE IF NOT EXISTS interrupted_captures (
   archive_id TEXT PRIMARY KEY,
   started_at TEXT NOT NULL
 );
+
+-- Persistent, app-wide registry of completed .sitearchive captures --
+-- separate from the "archives" table above, which is schema-locked to
+-- single-page auto-captures (has_mhtml/screenshot/text, one page per row).
+-- A .sitearchive is a portable multi-page file; this table is just an
+-- index of paths + summary stats for the history screen, not a copy of
+-- the archive's own content -- see siteArchiveHistoryRepo.ts.
+CREATE TABLE IF NOT EXISTS site_archive_captures (
+  archive_id TEXT PRIMARY KEY,
+  output_path TEXT NOT NULL,
+  site_title TEXT NOT NULL,
+  start_url TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  page_count INTEGER NOT NULL,
+  asset_count INTEGER NOT NULL,
+  file_size_bytes INTEGER NOT NULL,
+  thread_count INTEGER,
+  section_count INTEGER,
+  attachment_count INTEGER,
+  is_complete INTEGER NOT NULL,
+  incomplete_reason TEXT,
+  failure_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_site_archive_captures_captured_at ON site_archive_captures(captured_at);
 `;

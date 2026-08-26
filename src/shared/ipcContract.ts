@@ -12,7 +12,7 @@ const nonEmptyString = z.string().min(1).max(4096);
 const tabId = z.string().uuid();
 
 const captureScopeSchema = z.object({
-  kind: z.enum(['current-page', 'entire-site', 'custom']),
+  kind: z.enum(['current-page', 'entire-site', 'custom', 'forum-thread', 'forum-section', 'forum-whole']),
   // null means "no limit"; finite values are additionally clamped to
   // SCOPE_HARD_LIMITS in CaptureManager.clampScope.
   maxDepth: z.number().int().min(0).max(25).nullable(),
@@ -24,6 +24,9 @@ const captureScopeSchema = z.object({
   includeMedia: z.boolean(),
   crawlDelayMs: z.number().int().min(0).max(10_000),
   concurrency: z.number().int().min(1).max(6),
+  forumIncludeProfiles: z.boolean().optional(),
+  forumDownloadAttachments: z.boolean().optional(),
+  forumAttemptExternalImages: z.boolean().optional(),
 });
 const archiveId = z.string().uuid();
 
@@ -114,7 +117,10 @@ export const IpcSchemas = {
   // Scope values are validated here AND clamped again in
   // CaptureManager.clampScope, so a malformed or hostile value can never
   // translate into an unbounded crawl.
-  [Channels.siteCaptureEstimate]: z.object({ tabId }),
+  [Channels.siteCaptureEstimate]: z.object({
+    tabId,
+    forScopeKind: z.enum(['forum-thread', 'forum-section', 'forum-whole']).optional(),
+  }),
   [Channels.siteCaptureStart]: z.object({
     tabId,
     scope: captureScopeSchema,
@@ -129,7 +135,13 @@ export const IpcSchemas = {
   [Channels.siteArchiveOpenLive]: z.object({ url: nonEmptyString }),
   [Channels.siteArchiveConfirmExternal]: z.object({ url: nonEmptyString }),
   [Channels.siteArchiveSearch]: z.object({ tabId, query: z.string().max(500) }),
-  [Channels.siteArchiveNavigateToPage]: z.object({ tabId, pageId: nonEmptyString }),
+  [Channels.siteArchiveSearchForumPosts]: z.object({ tabId, query: z.string().max(500) }),
+  [Channels.siteArchiveNavigateToPage]: z.object({ tabId, pageId: nonEmptyString, anchor: z.string().max(255).optional() }),
+
+  // --- Persistent registry of completed .sitearchive captures ---
+  [Channels.siteArchiveHistoryList]: z.void(),
+  [Channels.siteArchiveHistoryRemove]: z.object({ archiveId }),
+  [Channels.siteArchiveHistoryReveal]: z.object({ archiveId }),
 
   // --- Interrupted-capture recovery ---
   // archiveId is the only identifier accepted from the renderer; the main

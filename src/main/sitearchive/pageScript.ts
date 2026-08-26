@@ -131,7 +131,26 @@ export const COLLECT_RESOURCES_SCRIPT = `
     }
   } catch (e) {}
 
-  // Links for crawling
+  // Links for crawling. Anchors that look like a file download (an
+  // explicit [download] attribute, or a URL shaped like an attachment --
+  // a document extension, or a common attachment path/query convention
+  // used by forum software that serves files with no extension at all,
+  // e.g. attachment.php?attachmentid=7) are ALSO pushed into resources
+  // below, so the existing subresource-fetch pipeline downloads their
+  // bytes as an asset. They stay in linksOut too so the crawler can
+  // recognize and skip them as pages rather than re-fetching HTML.
+  var ATTACHMENT_EXT_RE = /\\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|csv|txt|zip)$/i;
+  var ATTACHMENT_PATH_RE = /\\/(attachments?|download|files?)\\//i;
+  var ATTACHMENT_PARAM_RE = /\\b(attachmentid|attach|fileid|downloadid)=/i;
+  function looksLikeAttachmentHref(u) {
+    try {
+      var parsed = new URL(u);
+      return ATTACHMENT_EXT_RE.test(parsed.pathname) || ATTACHMENT_PATH_RE.test(parsed.pathname) || ATTACHMENT_PARAM_RE.test(parsed.search);
+    } catch (e) {
+      return false;
+    }
+  }
+
   var anchors = document.querySelectorAll('a[href]');
   var linksOut = [];
   for (var i = 0; i < anchors.length; i++) {
@@ -141,13 +160,17 @@ export const COLLECT_RESOURCES_SCRIPT = `
     if (!a) continue;
     var insideForm = !!anchors[i].closest('form');
     var rel = (anchors[i].getAttribute('rel') || '').toLowerCase();
+    var isDownload = anchors[i].hasAttribute('download');
     linksOut.push({
       url: a,
       text: (anchors[i].textContent || '').trim().slice(0, 200),
       rel: rel,
       insideForm: insideForm,
-      download: anchors[i].hasAttribute('download')
+      download: isDownload
     });
+    if (!insideForm && (isDownload || looksLikeAttachmentHref(a))) {
+      push(a, 'attachment', isDownload ? 'download-link' : 'attachment-link');
+    }
   }
 
   return {

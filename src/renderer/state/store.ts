@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { AppSettings, TabState } from '../../shared/types';
 
-export type Screen = 'browser' | 'library' | 'settings';
+export type Screen = 'browser' | 'library' | 'settings' | 'siteArchives';
 
 interface AppState {
   tabs: TabState[];

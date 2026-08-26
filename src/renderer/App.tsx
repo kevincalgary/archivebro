@@ -4,6 +4,7 @@ import TabBar from './components/TabBar';
 import Toolbar from './components/Toolbar';
 import BrowserSurface from './components/BrowserSurface';
 import LibraryScreen from './components/Library/LibraryScreen';
+import SiteArchiveHistoryScreen from './components/SiteArchives/SiteArchiveHistoryScreen';
 import SettingsScreen from './components/Settings/SettingsScreen';
 import CaptureScopeDialog from './components/Capture/CaptureScopeDialog';
 import CaptureProgressDialog from './components/Capture/CaptureProgressDialog';
@@ -277,6 +278,7 @@ export default function App() {
             }
           }}
           onOpenLibrary={() => setScreen('library')}
+          onOpenSiteArchives={() => setScreen('siteArchives')}
           onOpenSettings={() => setScreen('settings')}
           captureBusy={
             captureProgress !== null &&
@@ -302,6 +304,7 @@ export default function App() {
         */}
         <BrowserSurface active={screen === 'browser' && !modalOpen} />
         {screen === 'library' && <LibraryScreen onOpenLive={() => setScreen('browser')} />}
+        {screen === 'siteArchives' && <SiteArchiveHistoryScreen onOpenLive={() => setScreen('browser')} />}
         {screen === 'settings' && <SettingsScreen />}
 
         {openingArchive && (
@@ -330,8 +333,9 @@ export default function App() {
         />
       )}
 
-      {scopeDialog && (
+      {scopeDialog && activeTabId && (
         <CaptureScopeDialog
+          tabId={activeTabId}
           pageUrl={scopeDialog.url}
           pageTitle={scopeDialog.title}
           host={scopeDialog.host}

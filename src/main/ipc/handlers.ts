@@ -17,6 +17,7 @@ import { exportLibrary, importLibrary, LibraryTransferError } from '../library/l
 import { moveArchiveStorage } from '../util/moveStorage';
 import type { DiskUsageInfo } from '../../shared/types';
 import type { CaptureManager } from '../sitearchive/captureManager';
+import type { SiteArchiveHistoryRepo } from '../sitearchive/siteArchiveHistoryRepo';
 import { openSiteArchive, SiteArchiveError } from '../sitearchive/archiveReader';
 import { registerOpenedArchive, getSiteArchiveSession, getOpenedArchive } from '../sitearchive/sitearchiveSession';
 import { suggestArchiveFilename } from '../sitearchive/crawler';
@@ -36,6 +37,7 @@ interface Deps {
   archiveRepo: ArchiveRepo;
   captureManager: CaptureManager;
   updateService: UpdateService;
+  siteArchiveHistoryRepo: SiteArchiveHistoryRepo;
 }
 
 /**
@@ -52,7 +54,7 @@ interface Deps {
  *      a session, or a webContents.
  */
 export function registerIpcHandlers(deps: Deps): void {
-  const { settings, archiveRepo, captureManager, updateService } = deps;
+  const { settings, archiveRepo, captureManager, updateService, siteArchiveHistoryRepo } = deps;
 
   /** The window that made this call -- safe: only ever a trusted chrome window's own webContents, never a tab's. */
   function windowFor(event: IpcMainInvokeEvent): BrowserWindow {
@@ -319,11 +321,46 @@ export function registerIpcHandlers(deps: Deps): void {
     if (progress.state === 'completed' || progress.state === 'failed' || progress.state === 'cancelled') {
       jobWindowId.delete(progress.jobId);
     }
+    if (progress.state === 'completed' && progress.result) {
+      // Fire-and-forget: the capture-history registry is a convenience
+      // index, not load-bearing for the archive itself, so a failure here
+      // never surfaces as a capture failure. Re-opens the archive just
+      // written rather than threading archiveId/capturedAt/scope through
+      // CaptureProgress -- the manifest is already the authority on all of
+      // it, and this only runs once per completed capture.
+      void recordCaptureHistory(progress.result.archivePath).catch((err) => {
+        logger.warn('siteArchiveHistory.record_failed', { error: err instanceof Error ? err.message : String(err) });
+      });
+    }
   });
 
-  handle(Channels.siteCaptureEstimate, (args, event) => {
-    const tab = tabManagerFor(event).getTabInfo(args.tabId);
+  async function recordCaptureHistory(archivePath: string): Promise<void> {
+    const archive = await openSiteArchive(archivePath);
+    try {
+      const stat = await fs.stat(archivePath);
+      siteArchiveHistoryRepo.upsertFromManifest(archive.manifest.archiveId, archivePath, archive.manifest, stat.size);
+    } finally {
+      archive.close();
+    }
+  }
+
+  handle(Channels.siteCaptureEstimate, async (args, event) => {
+    const tabManager = tabManagerFor(event);
+    const tab = tabManager.getTabInfo(args.tabId);
     if (!tab) throw new Error('Tab not found');
+
+    let forumEstimate: { estimatedThreads: number | null; note: string } | undefined;
+    if (args.forScopeKind === 'forum-section' || args.forScopeKind === 'forum-whole') {
+      const count = await tabManager.estimateForumLinkCount(args.tabId);
+      forumEstimate = {
+        estimatedThreads: count,
+        note:
+          count === null
+            ? 'Estimate unavailable for this page.'
+            : `~${count} link${count === 1 ? '' : 's'} on this page alone -- an approximation, not a promise. The real total (and any additional sections/pages) is only known once the capture is running.`,
+      };
+    }
+
     return {
       url: tab.url,
       title: tab.title,
@@ -336,6 +373,7 @@ export function registerIpcHandlers(deps: Deps): void {
       })(),
       canCapture: /^https?:/i.test(tab.url),
       isBusy: captureManager.isBusy,
+      forumEstimate,
     };
   });
 
@@ -563,12 +601,35 @@ export function registerIpcHandlers(deps: Deps): void {
     return archive.search(args.query);
   });
 
-  /** Jump a site-archive tab to one of its own pages, e.g. a search result. */
+  /** Full-text search over forum posts inside an open .sitearchive -- see siteArchiveSearch above for the archiveId-from-tab security property. */
+  handle(Channels.siteArchiveSearchForumPosts, (args, event) => {
+    const archiveId = tabManagerFor(event).getSiteArchiveIdForTab(args.tabId);
+    if (!archiveId) return [];
+    const archive = getOpenedArchive(archiveId);
+    if (!archive) return [];
+    return archive.searchForumPosts(args.query);
+  });
+
+  /** Jump a site-archive tab to one of its own pages, e.g. a search result. `anchor`, when given, scrolls to that element id once the page loads (native browser fragment behavior -- no special handling needed on the served page). */
   handle(Channels.siteArchiveNavigateToPage, (args, event) => {
     const tabManager = tabManagerFor(event);
     const archiveId = tabManager.getSiteArchiveIdForTab(args.tabId);
     if (!archiveId) return { ok: false };
-    return { ok: tabManager.navigateSiteArchiveTab(args.tabId, archiveId, args.pageId) };
+    return { ok: tabManager.navigateSiteArchiveTab(args.tabId, archiveId, args.pageId, args.anchor) };
+  });
+
+  handle(Channels.siteArchiveHistoryList, () => siteArchiveHistoryRepo.list());
+
+  handle(Channels.siteArchiveHistoryRemove, (args) => {
+    siteArchiveHistoryRepo.remove(args.archiveId);
+    return { removed: true };
+  });
+
+  handle(Channels.siteArchiveHistoryReveal, (args) => {
+    const entry = siteArchiveHistoryRepo.get(args.archiveId);
+    if (!entry) return { revealed: false };
+    shell.showItemInFolder(entry.outputPath);
+    return { revealed: true };
   });
 
   async function openArchiveIntoTab(archivePath: string, event: IpcMainInvokeEvent): Promise<OpenedSiteArchive> {
@@ -579,6 +640,18 @@ export function registerIpcHandlers(deps: Deps): void {
       if (!entryPageId) {
         archive.close();
         throw new SiteArchiveError('Archive contains no pages', 'empty-archive');
+      }
+
+      // Backfills the history registry for an archive captured before this
+      // feature existed, or opened from a path this app instance never
+      // wrote itself (moved/copied/shared in). upsertFromManifest is
+      // idempotent, so this also just keeps an already-tracked row's
+      // stats current if the file moved.
+      if (!siteArchiveHistoryRepo.has(archive.manifest.archiveId)) {
+        void fs
+          .stat(archivePath)
+          .then((stat) => siteArchiveHistoryRepo.upsertFromManifest(archive.manifest.archiveId, archivePath, archive.manifest, stat.size))
+          .catch(() => {});
       }
 
       const sess = getSiteArchiveSession();

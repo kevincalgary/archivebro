@@ -75,7 +75,15 @@ export const Channels = {
   siteArchiveOpenLive: 'siteArchive:openLive',
   siteArchiveConfirmExternal: 'siteArchive:confirmExternal',
   siteArchiveSearch: 'siteArchive:search',
+  siteArchiveSearchForumPosts: 'siteArchive:searchForumPosts',
   siteArchiveNavigateToPage: 'siteArchive:navigateToPage',
+
+  // Persistent, app-wide registry of completed .sitearchive captures --
+  // separate from the auto-capture Library, which only tracks single-page
+  // captures. See siteArchiveHistoryRepo.ts.
+  siteArchiveHistoryList: 'siteArchiveHistory:list',
+  siteArchiveHistoryRemove: 'siteArchiveHistory:remove',
+  siteArchiveHistoryReveal: 'siteArchiveHistory:reveal',
 
   // Recovering an interrupted .sitearchive capture (distinct from
   // siteCapture:pause/resume, which toggle a *running* job's pause state --

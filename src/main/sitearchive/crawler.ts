@@ -24,7 +24,33 @@ import {
   looksNonContent,
   normalizeUrl,
 } from './urlNormalize';
+import {
+  looksLikeAttachment,
+  looksLikeForumPagination,
+  looksLikePrintOrAlternateView,
+  sectionKeyOf,
+  threadKeyOf,
+} from './forumLinks';
+import { fetchRobotsRules, isAllowedByRobots, type RobotsRules } from './robots';
 import { logger, redactUrl } from '../util/logger';
+
+/** True for any of the three forum-flavored scope kinds. */
+function isForumScopeKind(kind: CaptureScope['kind']): boolean {
+  return kind === 'forum-thread' || kind === 'forum-section' || kind === 'forum-whole';
+}
+
+/** Bounds a pagination chain so a genuine trap disguised as pagination still terminates. */
+const MAX_PAGINATION_HOPS_PER_UNIT = 500;
+
+/** The first path segment of a URL, e.g. "/forum" from "/forum/section-1". Empty string for a root-level URL. */
+function leadingPathSegment(url: string): string {
+  try {
+    const segments = new URL(url).pathname.split('/').filter(Boolean);
+    return segments.length > 0 ? `/${segments[0]}` : '';
+  } catch {
+    return '';
+  }
+}
 
 export type ProgressListener = (progress: CaptureProgress) => void;
 
@@ -32,6 +58,13 @@ interface QueueItem {
   url: string;
   depth: number;
   discoveredOn: string | null;
+  /**
+   * For forum-section/forum-whole scopes: the section this item belongs
+   * to, inherited from whichever ancestor page first "looks like" a
+   * section (see discoverLinks). Undefined until something in the chain
+   * establishes one -- e.g. the forum root itself has none yet.
+   */
+  forumSectionKey?: string;
 }
 
 /** Everything needed to pick a killed capture back up where it stopped. */
@@ -131,6 +164,28 @@ export class CaptureJob {
    * the real failures the user needs to see.
    */
   private skippedUrls = new Set<string>();
+  /**
+   * For forum-thread/forum-section scopes: the thread/section identity of
+   * the starting URL, computed once in run(). A link is only in scope for
+   * these narrow kinds when its own threadKeyOf/sectionKeyOf matches.
+   */
+  private startThreadKey: string | null = null;
+  private startSectionKey: string | null = null;
+  /**
+   * For forum-section: the section URL's leading path segment (e.g.
+   * "/forum" from "/forum/section-1"), used to keep a "thread from this
+   * section" link actually forum-shaped. Without this, an ordinary global
+   * nav link (Home, About, a product page) discovered on the section
+   * index page satisfies "not the section's own pagination, discovered
+   * from a page in this section" just as well as a real thread would.
+   */
+  private forumRootPrefix: string | null = null;
+  /** How many pagination hops have been followed for each thread/section key, bounding an otherwise-unbounded pagination chain. */
+  private paginationHopCounts = new Map<string, number>();
+  /** 1-based page-within-thread counter, keyed by forumThreadKey. */
+  private forumPageIndexByThreadKey = new Map<string, number>();
+  /** robots.txt rules for the start origin, fetched once in run(). Empty (allow-all) when unreachable/unparseable or when the scope isn't a forum-* kind. */
+  private robotsRules: RobotsRules = { rules: [] };
   private state: CaptureProgress['state'] = 'preparing';
   private pausedPromise: Promise<void> | null = null;
   private resumeFn: (() => void) | null = null;
@@ -198,6 +253,14 @@ export class CaptureJob {
     this.listeners.push(listener);
   }
 
+  private forumProgressFields(): Pick<CaptureProgress, 'threadsSaved' | 'imagesSaved'> {
+    if (!isForumScopeKind(this.scope.kind)) return {};
+    return {
+      threadsSaved: this.forumPageIndexByThreadKey.size,
+      imagesSaved: this.builder.assetCount,
+    };
+  }
+
   private emit(): void {
     const progress: CaptureProgress = {
       jobId: this.jobId,
@@ -212,6 +275,7 @@ export class CaptureJob {
       bytesDownloaded: this.bytesDownloaded,
       warningCount: this.warningCount,
       failureCount: this.builder.failureList.length,
+      ...this.forumProgressFields(),
     };
     for (const l of this.listeners) l(progress);
   }
@@ -230,6 +294,7 @@ export class CaptureJob {
       bytesDownloaded: this.bytesDownloaded,
       warningCount: this.warningCount,
       failureCount: this.builder.failureList.length,
+      ...this.forumProgressFields(),
       ...extra,
     };
     for (const l of this.listeners) l(progress);
@@ -274,6 +339,15 @@ export class CaptureJob {
 
     const startNormalized = normalizeUrl(this.startUrl);
     if (!startNormalized) throw new Error('Start URL could not be normalized');
+
+    if (isForumScopeKind(this.scope.kind)) {
+      if (this.scope.kind === 'forum-thread') this.startThreadKey = threadKeyOf(startNormalized);
+      if (this.scope.kind === 'forum-section') {
+        this.startSectionKey = sectionKeyOf(startNormalized);
+        this.forumRootPrefix = leadingPathSegment(startNormalized);
+      }
+      this.robotsRules = await fetchRobotsRules(startOrigin, this.session);
+    }
 
     if (this.resumeFrom) {
       // Every byte captured before the interruption is still in the
@@ -357,7 +431,7 @@ export class CaptureJob {
         });
       }
 
-      const { fileSizeBytes } = await this.builder.finalize({
+      const { fileSizeBytes, manifest: finalManifest } = await this.builder.finalize({
         finalPath: this.outputPath,
         startUrl: this.startUrl,
         startFinalUrl,
@@ -371,6 +445,7 @@ export class CaptureJob {
         assetCount: this.builder.assetCount,
         fileSizeBytes,
         failures: this.builder.failureList,
+        forumSummary: finalManifest.forumSummary,
       };
 
       this.state = 'completed';
@@ -660,6 +735,13 @@ export class CaptureJob {
     for (const f of checkpoint.failures) {
       if (f.kind.startsWith('skipped-')) this.skippedUrls.add(normalizeUrl(f.url) ?? f.url);
     }
+    // So the "threads saved" progress counter reflects pre-resume work
+    // immediately rather than starting back at zero until new pages land.
+    for (const p of checkpoint.pages) {
+      if (!p.forumThreadKey) continue;
+      const existing = this.forumPageIndexByThreadKey.get(p.forumThreadKey) ?? 0;
+      if ((p.forumPageIndex ?? 0) > existing) this.forumPageIndexByThreadKey.set(p.forumThreadKey, p.forumPageIndex ?? existing + 1);
+    }
   }
 
   private async capturePageSafely(
@@ -723,6 +805,24 @@ export class CaptureJob {
       // Let client-rendered content settle before serializing.
       await sleep(600);
 
+      let forumThreadKey: string | undefined;
+      let forumSectionKey: string | undefined;
+      let forumPageIndex: number | undefined;
+      if (isForumScopeKind(this.scope.kind)) {
+        const candidateThreadKey = threadKeyOf(finalNormalized);
+        // A section's own index page (e.g. /forum/section-1) shares no
+        // pagination shape distinguishing it from "a thread with a very
+        // plain URL" -- exclude it explicitly so the forum summary's
+        // thread count doesn't include the section listing itself.
+        const isSectionIndexPage = this.scope.kind === 'forum-section' && candidateThreadKey === this.startSectionKey;
+        if (!isSectionIndexPage) {
+          forumThreadKey = candidateThreadKey;
+          forumPageIndex = (this.forumPageIndexByThreadKey.get(forumThreadKey) ?? 0) + 1;
+          this.forumPageIndexByThreadKey.set(forumThreadKey, forumPageIndex);
+        }
+        forumSectionKey = item.forumSectionKey ?? this.startSectionKey ?? undefined;
+      }
+
       const result = await capturePage(
         view.webContents,
         {
@@ -741,6 +841,9 @@ export class CaptureJob {
           normalizedUrl: finalNormalized,
           depth: item.depth,
           redirectedFrom: finalNormalized !== normalized ? [normalized] : [],
+          forumThreadKey,
+          forumSectionKey,
+          forumPageIndex,
         },
       );
 
@@ -767,9 +870,17 @@ export class CaptureJob {
         worker.consecutiveScreenshotDegradations = 0;
       }
 
-      // Discover further pages, unless we've hit the depth limit.
-      if (this.scope.maxDepth === null || item.depth < this.scope.maxDepth) {
-        await this.discoverLinks(result.links, finalUrl, item.depth + 1, startOrigin);
+      // Discover further pages, unless we've hit the depth limit. For a
+      // forum scope, this check is intentionally skipped: discoverLinks
+      // itself decides per-link whether to advance depth (pagination
+      // stays at this page's own depth; a genuinely new thread/section
+      // costs a slot), so gating the call itself on item.depth < maxDepth
+      // would stop even a maxDepth:0 thread capture from ever finding its
+      // own page 2 -- the depth check that matters for those links still
+      // happens naturally, once each enqueued item is itself dequeued and
+      // this same check runs again for it.
+      if (isForumScopeKind(this.scope.kind) || this.scope.maxDepth === null || item.depth < this.scope.maxDepth) {
+        await this.discoverLinks(result.links, finalUrl, item.depth, startOrigin, forumSectionKey);
       }
 
       this.emit();
@@ -788,9 +899,15 @@ export class CaptureJob {
   private async discoverLinks(
     links: DiscoveredLink[],
     pageUrl: string,
-    nextDepth: number,
+    currentDepth: number,
     startOrigin: string,
+    /** For forum-section/forum-whole: the section this page belongs to, if established yet. */
+    pageSectionKey?: string,
   ): Promise<void> {
+    const isForumScope = isForumScopeKind(this.scope.kind);
+    const pageNormalized = normalizeUrl(pageUrl);
+    const pageThreadKey = pageNormalized ? threadKeyOf(pageNormalized) : null;
+
     for (const link of links) {
       if (this.pagesDiscovered >= SCOPE_HARD_LIMITS.maxPages) return;
 
@@ -817,15 +934,53 @@ export class CaptureJob {
         continue; // out of scope is normal, not a failure worth listing
       }
 
-      if (looksLikeCrawlerTrap(absolute)) {
-        await this.recordSkip({ url: absolute, kind: 'skipped-trap', message: 'URL matched a crawler-trap heuristic', discoveredOn: pageUrl });
+      if (isForumScope && !isAllowedByRobots(new URL(absolute).pathname, this.robotsRules)) {
+        await this.recordSkip({ url: absolute, kind: 'skipped-non-content', message: 'Disallowed by robots.txt', discoveredOn: pageUrl });
         continue;
       }
 
-      // Sign-in flows, search endpoints and member profiles are not
-      // archivable content, and on a link-dense site they crowd out the
-      // pages the user actually wanted.
-      if (looksNonContent(absolute)) {
+      const normalized = normalizeUrl(absolute);
+      const isPagination = isForumScope && normalized !== null && looksLikeForumPagination(absolute, link.text);
+
+      // Print/alternate-view duplicates of a page reachable in its normal
+      // form are never crawled at all, forum scope or not.
+      if (looksLikePrintOrAlternateView(absolute)) {
+        await this.recordSkip({ url: absolute, kind: 'skipped-duplicate', message: 'Print/alternate view of a page already reachable normally', discoveredOn: pageUrl });
+        continue;
+      }
+
+      // Downloadable documents/attachments are captured as assets by the
+      // page's own resource-fetch pass (see pageScript.ts/pageCapture.ts),
+      // never crawled as pages.
+      if (link.download || (isForumScope && looksLikeAttachment(absolute))) {
+        if (!link.download && this.scope.forumDownloadAttachments === false) {
+          await this.recordSkip({ url: absolute, kind: 'skipped-attachment-excluded', message: 'Attachment downloads are turned off for this capture', discoveredOn: pageUrl });
+        }
+        continue;
+      }
+
+      // Pagination is checked before the generic crawler-trap heuristic --
+      // a legitimate `?page=47` on a long thread must never be mistaken
+      // for a generated URL permutation. It gets its own, more generous
+      // bound instead.
+      if (!isPagination && looksLikeCrawlerTrap(absolute)) {
+        await this.recordSkip({ url: absolute, kind: 'skipped-trap', message: 'URL matched a crawler-trap heuristic', discoveredOn: pageUrl });
+        continue;
+      }
+      if (isPagination) {
+        const hopKey = pageThreadKey ?? pageUrl;
+        const hops = (this.paginationHopCounts.get(hopKey) ?? 0) + 1;
+        this.paginationHopCounts.set(hopKey, hops);
+        if (hops > MAX_PAGINATION_HOPS_PER_UNIT) {
+          await this.recordSkip({ url: absolute, kind: 'skipped-trap', message: 'Pagination chain exceeded its bound', discoveredOn: pageUrl });
+          continue;
+        }
+      }
+
+      // Sign-in flows, search endpoints and (unless opted in) member
+      // profiles are not archivable content, and on a link-dense site
+      // they crowd out the pages the user actually wanted.
+      if (looksNonContent(absolute, { includeProfiles: isForumScope && this.scope.forumIncludeProfiles === true })) {
         await this.recordSkip({
           url: absolute,
           kind: 'skipped-non-content',
@@ -835,10 +990,59 @@ export class CaptureJob {
         continue;
       }
 
-      // Downloadable documents are captured as assets, not crawled as pages.
-      if (link.download) continue;
+      let childSectionKey = pageSectionKey;
+      if (isForumScope && this.scope.kind !== 'forum-thread' && normalized) {
+        if (this.scope.kind === 'forum-section') {
+          // Narrow scope: only the section's own pagination, or a thread
+          // discovered directly from a page inside that section, is in
+          // scope. Anything else is deliberately excluded rather than
+          // guessed at -- overreaching a "this section only" request
+          // would violate the scope the user asked for.
+          const linkSectionKey = sectionKeyOf(normalized);
+          const onStartSection = pageSectionKey === this.startSectionKey;
+          const isSectionPagination = linkSectionKey === this.startSectionKey;
+          // "Discovered from the section index" alone isn't enough --
+          // that page's global nav links to unrelated parts of the site
+          // just as easily as it links to a real thread. Requiring the
+          // same leading path segment as the section itself (e.g. both
+          // under "/forum") keeps this to forum-shaped links.
+          const looksForumShaped = this.forumRootPrefix !== null && leadingPathSegment(normalized) === this.forumRootPrefix;
+          const isThreadFromStartSection = onStartSection && !isSectionPagination && looksForumShaped;
+          const isThreadPagination = pageThreadKey !== null && isPagination && threadKeyOf(normalized) === pageThreadKey;
+          if (!isSectionPagination && !isThreadFromStartSection && !isThreadPagination) {
+            await this.recordSkip({ url: absolute, kind: 'skipped-out-of-forum-scope', message: 'Outside the selected forum section', discoveredOn: pageUrl });
+            continue;
+          }
+          childSectionKey = this.startSectionKey ?? undefined;
+        } else if (this.scope.kind === 'forum-whole' && pageSectionKey === undefined) {
+          // Nothing has established a section yet (we're still at/near
+          // the forum root) -- the first page a link is discovered from
+          // becomes the working section identity for everything reached
+          // through it. A forum that links threads straight from the
+          // root without an intermediate section page simply never gets
+          // this label, which only affects the section-grouping summary,
+          // not what gets captured.
+          childSectionKey = pageNormalized ? sectionKeyOf(pageNormalized) : undefined;
+        }
+      } else if (isForumScope && this.scope.kind === 'forum-thread' && normalized) {
+        // Narrowest scope: only pagination of the exact starting thread.
+        if (threadKeyOf(normalized) !== this.startThreadKey) {
+          await this.recordSkip({ url: absolute, kind: 'skipped-out-of-forum-scope', message: 'Outside the selected thread', discoveredOn: pageUrl });
+          continue;
+        }
+      }
 
-      await this.enqueue({ url: absolute, depth: nextDepth, discoveredOn: pageUrl });
+      const nextDepth = isPagination ? currentDepth : currentDepth + 1;
+      // For forum scopes the outer maxDepth gate on calling discoverLinks
+      // at all is bypassed (see capturePageSafely), specifically so
+      // pagination -- which never advances depth -- keeps working at the
+      // depth ceiling. A genuinely new (non-pagination) link still has to
+      // respect maxDepth, so that check happens here instead, per link,
+      // rather than at the call site.
+      if (isForumScope && !isPagination && this.scope.maxDepth !== null && nextDepth > this.scope.maxDepth) {
+        continue; // beyond the depth limit -- normal, not a failure worth listing
+      }
+      await this.enqueue({ url: absolute, depth: nextDepth, discoveredOn: pageUrl, forumSectionKey: childSectionKey });
     }
   }
 

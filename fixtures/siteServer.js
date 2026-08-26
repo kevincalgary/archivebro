@@ -348,8 +348,39 @@ const FORUM_SECTIONS = 12;
 const FORUM_THREADS_PER_SECTION = 6;
 const FORUM_MEMBERS = 8;
 const FORUM_UTILITY = ['/forum/login', '/forum/register', '/forum/search', '/forum/members', '/forum/new-thread', '/forum/help/faq'];
+/** Threads 1-1 and 2-1 get real pagination -- two conventions (query param and path segment) so both are exercised. */
+const PAGINATED_THREADS = { '1-1': 'query', '2-1': 'path' };
+const POSTS_PER_THREAD_PAGE = 2;
+const THREAD_PAGE_COUNT = 3;
 
-function forumRoute(pathname) {
+function forumPost(threadKey, pageNum, indexOnPage) {
+  // Purely numeric id -- id="post-<n>" is what real vBulletin/XenForo/
+  // phpBB markup (and forumPageScript.ts's POST_ID_RE) uses. Only needs
+  // to be unique within this one page's DOM, not archive-wide -- each
+  // thread page is captured as its own separate document.
+  const n = (pageNum - 1) * POSTS_PER_THREAD_PAGE + indexOnPage + 1;
+  const authorNum = (n % FORUM_MEMBERS) + 1;
+  return `<div class="post" id="post-${n}">
+    <div class="post-header">
+      <a class="username" href="/forum/members/user-${authorNum}">User ${authorNum}</a>
+      <img class="avatar" src="/forum/avatars/user-${authorNum}.png" alt="avatar">
+      <time datetime="2024-01-${String((n % 28) + 1).padStart(2, '0')}T12:00:00Z">2024-01-${String((n % 28) + 1).padStart(2, '0')}</time>
+      <a class="post-number" href="#post-${n}">#${n}</a>
+    </div>
+    <div class="postcontent">
+      <p>Post number ${n} in thread ${threadKey}. This is the content someone actually wants archived.</p>
+      <img class="emoji" src="/forum/emoji/smile.png" alt=":)">
+    </div>
+  </div>`;
+}
+
+/**
+ * `opts.externalImageUrl`, when given, is embedded in one thread page so
+ * "externally hosted image" capture can be exercised against a real,
+ * independently-served origin (see the second HTTP server started
+ * alongside the main one in startSiteFixtureServer).
+ */
+function forumRoute(pathname, search, opts = {}) {
   if (pathname === '/forum') {
     const sections = Array.from({ length: FORUM_SECTIONS }, (_, i) => `<li><a href="/forum/section-${i + 1}">Section ${i + 1}</a></li>`);
     const members = Array.from({ length: FORUM_MEMBERS }, (_, i) => `<li><a href="/forum/members/user-${i + 1}">User ${i + 1}</a></li>`);
@@ -369,30 +400,148 @@ function forumRoute(pathname) {
   if (section) {
     const s = Number(section[1]);
     if (s < 1 || s > FORUM_SECTIONS) return null;
-    const threads = Array.from(
-      { length: FORUM_THREADS_PER_SECTION },
-      (_, j) => `<li><a href="/forum/thread-${s}-${j + 1}">Thread ${s}-${j + 1}</a></li>`,
-    );
-    return { body: layout(`Section ${s}`, `<h1>Section ${s}</h1><ul class="threads">${threads.join('')}</ul>`) };
-  }
-
-  const thread = /^\/forum\/thread-(\d+)-(\d+)$/.exec(pathname);
-  if (thread) {
-    const [, s, j] = thread;
+    const params = new URLSearchParams(search);
+    const page = Number(params.get('page') || '1');
+    // Section 1 has a second page of threads -- everything else fits on one page.
+    const extraThreads = s === 1 && page === 2 ? [`<li><a href="/forum/thread-1-extra">Thread 1-extra</a></li>`] : [];
+    const threads =
+      page === 1
+        ? Array.from({ length: FORUM_THREADS_PER_SECTION }, (_, j) => `<li><a href="/forum/thread-${s}-${j + 1}">Thread ${s}-${j + 1}</a></li>`)
+        : extraThreads;
+    const pagination =
+      s === 1 && page === 1
+        ? `<a class="next-page" href="/forum/section-1?page=2">Next</a>`
+        : '';
     return {
       body: layout(
-        `Thread ${s}-${j}`,
-        `<h1>Thread ${s}-${j}</h1>
-         <div class="post"><p>First post in thread ${s}-${j}. This is the content someone actually wants archived.</p></div>
-         <div class="post"><p>A reply in thread ${s}-${j}.</p></div>
-         <a href="/forum/section-${s}">Back to Section ${s}</a>`,
+        `Section ${s}`,
+        `<h1>Section ${s}${page > 1 ? ` (page ${page})` : ''}</h1><ul class="threads">${threads.join('')}</ul>${pagination}
+         <a class="print-view" href="/forum/section-${s}?mode=print">Printable version</a>`,
       ),
     };
+  }
+
+  const thread = /^\/forum\/thread-(\d+)-(\d+|extra)$/.exec(pathname);
+  const threadPathPage = /^\/forum\/thread-(\d+)-(\d+)\/page\/(\d+)$/.exec(pathname);
+  if (thread || threadPathPage) {
+    const s = (thread || threadPathPage)[1];
+    const j = (thread || threadPathPage)[2];
+    const threadKey = `${s}-${j}`;
+    const params = thread ? new URLSearchParams(search) : null;
+    const pageFromQuery = params ? Number(params.get('page') || '1') : null;
+    const pageFromPath = threadPathPage ? Number(threadPathPage[3]) : null;
+    const pageNum = pageFromPath ?? pageFromQuery ?? 1;
+    const paginationStyle = PAGINATED_THREADS[threadKey];
+
+    if (pageNum > 1 && !paginationStyle) return null; // non-paginated threads only have page 1
+    if (pageNum > THREAD_PAGE_COUNT) return null;
+
+    const posts = Array.from({ length: POSTS_PER_THREAD_PAGE }, (_, i) => forumPost(threadKey, pageNum, i)).join('');
+    const externalImage = opts.externalImageUrl && threadKey === '1-1' && pageNum === 1 ? `<img class="external-photo" src="${opts.externalImageUrl}" alt="external">` : '';
+    const brokenImage =
+      threadKey === '1-1' && pageNum === 1
+        ? `<img id="broken" class="broken-photo" src="/forum/attachments/does-not-exist.jpg" width="80" height="80" alt="missing">`
+        : '';
+    const attachments =
+      threadKey === '1-1' && pageNum === 1
+        ? `<p><a href="/forum/attachments/file-1.pdf">manual.pdf</a></p>
+           <p><a href="/forum/attachment.php?attachmentid=7">Download attachment</a></p>`
+        : '';
+    // A real forum's "quick reply" box, present on a page that actually
+    // gets captured (unlike /forum/login, which the crawler never
+    // visits) -- exercises the credential-stripping assertion where it
+    // matters, since these fields never leave the fixture's own DOM.
+    const replyForm =
+      threadKey === '1-1' && pageNum === 1
+        ? `<form method="post" action="/forum/reply">
+             <input type="hidden" name="csrf_token" value="FORUM-SECRET-CSRF-TOKEN">
+             <input type="hidden" name="session_id" value="FORUM-SECRET-SESSION-ID">
+             <textarea name="message" placeholder="Post a reply"></textarea>
+             <button type="submit">Reply</button>
+           </form>`
+        : '';
+    let pagination = '';
+    if (paginationStyle === 'query' && pageNum < THREAD_PAGE_COUNT) {
+      pagination = `<a class="next-page" href="/forum/thread-${threadKey}?page=${pageNum + 1}">Next</a>`;
+    } else if (paginationStyle === 'path' && pageNum < THREAD_PAGE_COUNT) {
+      pagination = `<a class="next-page" href="/forum/thread-${threadKey}/page/${pageNum + 1}">Next</a>`;
+    }
+    const printHref = paginationStyle === 'path' ? `/forum/thread-${threadKey}/page/${pageNum}?mode=print` : `/forum/thread-${threadKey}?page=${pageNum}&mode=print`;
+
+    return {
+      body: layout(
+        `Thread ${threadKey}${pageNum > 1 ? ` (page ${pageNum})` : ''}`,
+        `<h1>Thread ${threadKey}</h1>
+         ${posts}
+         ${externalImage}
+         ${brokenImage}
+         ${attachments}
+         ${replyForm}
+         ${pagination}
+         <a class="print-view" href="${printHref}">Printable version</a>
+         ${threadKey === '1-1' && pageNum === 1 ? `<a class="legacy-link" href="/forum/viewtopic.php?t=1">Old-style link to this thread</a>` : ''}
+         <a href="/forum/section-${s === 'extra' ? 1 : s}">Back to Section</a>`,
+      ),
+    };
+  }
+
+  // Legacy alias for thread 1-1, same content reached a different way --
+  // a duplicate-URL/normalization exercise.
+  if (pathname === '/forum/viewtopic.php') {
+    const params = new URLSearchParams(search);
+    if (params.get('t') === '1') {
+      return { status: 301, headers: { Location: '/forum/thread-1-1' }, body: '' };
+    }
+    return null;
   }
 
   const member = /^\/forum\/members\/user-(\d+)$/.exec(pathname);
   if (member) {
     return { body: layout(`User ${member[1]}`, `<h1>User ${member[1]}</h1><p>Member profile, not forum content.</p>`) };
+  }
+
+  const avatar = /^\/forum\/avatars\/user-(\d+)\.png$/.exec(pathname);
+  if (avatar) {
+    const n = Number(avatar[1]);
+    return { body: makePng(16, 16, [(n * 37) % 256, (n * 61) % 256, (n * 89) % 256]), contentType: 'image/png' };
+  }
+
+  if (pathname === '/forum/emoji/smile.png') {
+    return { body: makePng(8, 8, [255, 210, 0]), contentType: 'image/png' };
+  }
+
+  if (pathname === '/forum/attachments/file-1.pdf') {
+    // Not a real PDF -- just enough bytes with the right content-type to
+    // exercise attachment download/asset-storage, not PDF rendering.
+    return { body: Buffer.from('%PDF-1.4 fixture attachment content\n%%EOF'), contentType: 'application/pdf' };
+  }
+
+  if (pathname === '/forum/attachment.php') {
+    const params = new URLSearchParams(search);
+    if (params.get('attachmentid') === '7') {
+      return { body: Buffer.from('%PDF-1.4 fixture attachment (no-extension URL)\n%%EOF'), contentType: 'application/pdf' };
+    }
+    return null;
+  }
+
+  // A sign-in form carrying a fake session-cookie-shaped hidden field and
+  // CSRF token, mirroring sitearchive-capture.spec.ts's credential test --
+  // used by the forum-specific "raw archive bytes never contain the
+  // secret" assertion.
+  if (pathname === '/forum/login') {
+    return {
+      body: layout(
+        'Forum Log In',
+        `<h1>Log In</h1>
+         <form method="post" action="/forum/login">
+           <input type="hidden" name="csrf_token" value="FORUM-SECRET-CSRF-TOKEN">
+           <input type="hidden" name="session_id" value="FORUM-SECRET-SESSION-ID">
+           <label>Username <input type="text" name="username"></label>
+           <label>Password <input type="password" name="password" value="hunter2forum"></label>
+           <button type="submit">Log in</button>
+         </form>`,
+      ),
+    };
   }
 
   if (FORUM_UTILITY.includes(pathname)) {
@@ -402,7 +551,29 @@ function forumRoute(pathname) {
   return null;
 }
 
-function startSiteFixtureServer(port = 0) {
+/**
+ * A second, independently-served origin, used only to give the forum
+ * fixture one genuinely externally-hosted image -- exercising
+ * forumAttemptExternalImages against a real cross-origin fetch rather
+ * than a same-origin URL that merely looks external.
+ */
+function startExternalImageServer() {
+  return new Promise((resolve) => {
+    const png = makePng(12, 12, [40, 120, 200]);
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      res.end(png);
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      resolve({ server, url: `http://127.0.0.1:${port}/external-photo.png` });
+    });
+  });
+}
+
+async function startSiteFixtureServer(port = 0) {
+  const external = await startExternalImageServer();
   let requestCount = 0;
   const requestLog = [];
   // Resume-only retry tests (tests/e2e/sitearchive-retry.spec.ts): while
@@ -462,9 +633,12 @@ function startSiteFixtureServer(port = 0) {
 
       const route = routes[url.pathname];
       if (!route) {
-        const forum = forumRoute(url.pathname);
+        const forum = forumRoute(url.pathname, url.search, { externalImageUrl: external.url });
         if (forum) {
-          res.writeHead(forum.status ?? 200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.writeHead(forum.status ?? 200, {
+            'Content-Type': forum.contentType ?? 'text/html; charset=utf-8',
+            ...(forum.headers ?? {}),
+          });
           res.end(forum.body);
           return;
         }
@@ -478,12 +652,19 @@ function startSiteFixtureServer(port = 0) {
       res.end(out.body);
     });
 
+    // Closing the main server also closes the external-image one, so
+    // every existing test's `server.close()` in a finally block keeps
+    // working unmodified -- nothing about the fixture's external contract
+    // changes for callers that don't care about it.
+    server.on('close', () => external.server.close());
+
     server.listen(port, '127.0.0.1', () => {
       const address = server.address();
       const actualPort = typeof address === 'object' && address ? address.port : port;
       resolve({
         server,
         url: `http://127.0.0.1:${actualPort}`,
+        externalImageUrl: external.url,
         getRequestCount: () => requestCount,
         getRequestLog: () => requestLog.slice(),
       });

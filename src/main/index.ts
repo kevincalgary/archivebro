@@ -14,6 +14,7 @@ import { enforceStoragePolicies } from './settings/storageManager';
 import { Channels } from '../shared/ipcContract';
 import { installTestHooks } from './testHooks';
 import { CaptureManager } from './sitearchive/captureManager';
+import { SiteArchiveHistoryRepo } from './sitearchive/siteArchiveHistoryRepo';
 import { listRecoverableCaptures, sweepSiteArchiveStaging } from './sitearchive/archiveWriter';
 import { registerArchiveSiteSchemeAsPrivileged, closeAllOpenedArchives } from './sitearchive/sitearchiveSession';
 import { setPermissionPromptEmitter, denyAllPendingPermissions } from './security/permissionPrompts';
@@ -85,6 +86,7 @@ async function main(): Promise<void> {
   const dbPath = path.join(app.getPath('userData'), 'archive-browser.sqlite3');
   const db = openDatabase(dbPath);
   const archiveRepo = new ArchiveRepo(db);
+  const siteArchiveHistoryRepo = new SiteArchiveHistoryRepo(db);
 
   await recoverFromInterruptedCaptures(archiveRepo, settings.get().archiveStorageDir);
   // A capture killed mid-crawl leaves gigabytes in the OS temp directory
@@ -128,7 +130,7 @@ async function main(): Promise<void> {
   updateService = new UpdateService(settings);
   updateService.start();
 
-  registerIpcHandlers({ settings, archiveRepo, captureManager, updateService });
+  registerIpcHandlers({ settings, archiveRepo, captureManager, updateService, siteArchiveHistoryRepo });
   buildAppMenu(
     () => createAppWindow(windowDeps),
     () => void updateService?.checkNow(),

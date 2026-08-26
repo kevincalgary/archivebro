@@ -9,6 +9,8 @@ import type {
   AssetKind,
   CaptureFailureEntry,
   CaptureScopeKind,
+  ForumCaptureSummary,
+  ForumPostEntry,
   RecoverableCaptureSummary,
   RouteMapEntry,
   ScreenshotFallbackMeta,
@@ -395,6 +397,18 @@ export class SiteArchiveBuilder {
   private assets = new Map<string, ArchivedAssetEntry>();
   private responses = new Map<string, ArchivedResponseEntry>();
   private routes = new Map<string, RouteMapEntry>();
+  private forumPosts: ForumPostEntry[] = [];
+  /**
+   * Real forum markup isn't always well-formed -- a post's container and
+   * an inner anchor can both carry the same id="post-<n>" (seen on real
+   * vBulletin pages), so DETECT_FORUM_POSTS_SCRIPT can report the same
+   * anchor twice for one page. Without this, the second addForumPost()
+   * call inserted a duplicate primary key at finalize time, which threw
+   * out of writeIndexDatabase()'s transaction and discarded the *entire*
+   * capture -- pages and assets that had already succeeded included, not
+   * just the mis-indexed post.
+   */
+  private seenForumPostIds = new Set<string>();
   private failures: CaptureFailureEntry[] = [];
   private failureCountsByKind = new Map<string, number>();
   private stagingDir: string | null = null;
@@ -446,7 +460,7 @@ export class SiteArchiveBuilder {
 
   private async ensureStagingLayout(): Promise<void> {
     const staging = this.requireStaging();
-    for (const sub of ['pages', 'assets', 'screenshots', 'responses']) {
+    for (const sub of ['pages', 'assets', 'screenshots', 'responses', 'posts']) {
       await fs.mkdir(path.join(staging, sub), { recursive: true });
     }
   }
@@ -466,6 +480,8 @@ export class SiteArchiveBuilder {
     this.assets = checkpoint.assets;
     this.responses = checkpoint.responses;
     this.routes = checkpoint.routes;
+    this.forumPosts = checkpoint.forumPosts ?? [];
+    this.seenForumPostIds = new Set(this.forumPosts.map((p) => p.postId));
     this.failures = checkpoint.failures;
     this.failureCountsByKind = new Map();
     for (const f of checkpoint.failures) {
@@ -492,6 +508,16 @@ export class SiteArchiveBuilder {
     this.assets = new Map(manifest.assets.map((a) => [a.sha256, a]));
     this.responses = new Map(manifest.responses.map((r) => [r.sha256, r]));
     this.routes = new Map(manifest.routes.map((r) => [r.normalizedUrl, r]));
+    // Posts belonging to a page being retried are dropped -- a successful
+    // retry re-extracts them fresh (capturePostsForIndex runs again for
+    // that page); a still-failing retry has no page to extract from at
+    // all. copyExistingEntriesIntoStaging (retryFailedPages.ts) carries
+    // the corresponding posts/<id>.txt bodies over for everything kept.
+    const retriedPageIds = new Set(
+      manifest.pages.filter((p) => retryingUrls.has(p.normalizedUrl)).map((p) => p.pageId),
+    );
+    this.forumPosts = (manifest.forumPosts ?? []).filter((post) => !retriedPageIds.has(post.pageId));
+    this.seenForumPostIds = new Set(this.forumPosts.map((p) => p.postId));
     this.failures = manifest.failures.filter((f) => !retryingUrls.has(f.url));
     this.failureCountsByKind = new Map();
     for (const f of this.failures) {
@@ -642,6 +668,9 @@ export class SiteArchiveBuilder {
     screenshot: Buffer | null;
     text: string | null;
     redirectedFrom: string[];
+    forumThreadKey?: string;
+    forumSectionKey?: string;
+    forumPageIndex?: number;
   }): Promise<ArchivedPageEntry> {
     const staging = this.requireStaging();
     const htmlBuf = Buffer.from(input.html, 'utf8');
@@ -685,6 +714,9 @@ export class SiteArchiveBuilder {
       redirectedFrom: input.redirectedFrom,
       contentType: 'text/html; charset=utf-8',
       byteSize: htmlBuf.length,
+      ...(input.forumThreadKey ? { forumThreadKey: input.forumThreadKey } : {}),
+      ...(input.forumSectionKey ? { forumSectionKey: input.forumSectionKey } : {}),
+      ...(input.forumPageIndex !== undefined ? { forumPageIndex: input.forumPageIndex } : {}),
     };
     this.pages.push(entry);
     this.pageNormalizedUrls.add(input.normalizedUrl);
@@ -702,6 +734,30 @@ export class SiteArchiveBuilder {
   /** Point a normalized URL at an already-stored asset (for rewritten links). */
   async routeAsset(normalizedUrl: string, sha: string): Promise<void> {
     await this.setRoute({ normalizedUrl, target: { type: 'asset', sha256: sha } });
+  }
+
+  /**
+   * Record one best-effort-extracted forum post. `bodyText` is written to
+   * `posts/<postFileId>.txt` immediately (same "write bytes, then journal"
+   * ordering as every other entry, and the same reason pageCapture.ts's
+   * page bodies aren't held in memory for the whole crawl -- a large
+   * thread can have thousands of posts). The file is read back once, at
+   * writeIndexDatabase() time, to populate forum_posts_fts.
+   */
+  async addForumPost(entry: ForumPostEntry, bodyText: string): Promise<void> {
+    if (this.seenForumPostIds.has(entry.postId)) return; // duplicate anchor on the same page -- see the field comment above
+    this.seenForumPostIds.add(entry.postId);
+
+    const staging = this.requireStaging();
+    const fileId = sha256(entry.postId);
+    await fs.writeFile(path.join(staging, 'posts', `${fileId}.txt`), bodyText, 'utf8');
+    this.totalUncompressed += Buffer.byteLength(bodyText, 'utf8');
+    this.forumPosts.push(entry);
+    await this.journal?.append({ t: 'forumPost', e: entry });
+  }
+
+  get forumPostCount(): number {
+    return this.forumPosts.length;
   }
 
   async addFailure(failure: CaptureFailureEntry): Promise<void> {
@@ -737,6 +793,30 @@ export class SiteArchiveBuilder {
     return this.failures;
   }
 
+  /** Aggregate forum stats for the terminal progress/history summary. Distinct thread/section counts come from ArchivedPageEntry.forumThreadKey/forumSectionKey, since that's set on every page captured under a forum-* scope regardless of whether it had recognizable post markup. */
+  private computeForumSummary(): ForumCaptureSummary {
+    const threadKeys = new Set<string>();
+    const sectionKeys = new Set<string>();
+    let profileCount = 0;
+    const PROFILE_URL_RE = /\/(members?|profile|user)\//i;
+    for (const p of this.pages) {
+      if (p.forumThreadKey) threadKeys.add(p.forumThreadKey);
+      if (p.forumSectionKey) sectionKeys.add(p.forumSectionKey);
+      if (!p.forumThreadKey && PROFILE_URL_RE.test(p.normalizedUrl)) profileCount += 1;
+    }
+    let attachmentCount = 0;
+    for (const a of this.assets.values()) {
+      if (a.kind === 'document') attachmentCount += 1;
+    }
+    return {
+      sectionCount: sectionKeys.size,
+      threadCount: threadKeys.size,
+      postCount: this.forumPosts.length,
+      attachmentCount,
+      profileCount,
+    };
+  }
+
   /** Build the SQLite catalog that ships inside the container. */
   private async writeIndexDatabase(): Promise<{ buffer: Buffer; relPath: string }> {
     const staging = this.requireStaging();
@@ -754,6 +834,17 @@ export class SiteArchiveBuilder {
       if (!p.textPath) continue;
       try {
         bodies.set(p.pageId, await fs.readFile(path.join(staging, p.textPath), 'utf8'));
+      } catch {
+        // handled by the ?? '' fallback below
+      }
+    }
+
+    // Same read-back-at-finalize pattern as page bodies above, for the
+    // per-post text files addForumPost() wrote during the crawl.
+    const postBodies = new Map<string, string>();
+    for (const post of this.forumPosts) {
+      try {
+        postBodies.set(post.postId, await fs.readFile(path.join(staging, 'posts', `${sha256(post.postId)}.txt`), 'utf8'));
       } catch {
         // handled by the ?? '' fallback below
       }
@@ -796,6 +887,25 @@ export class SiteArchiveBuilder {
         -- "search inside this archive" doesn't mean decompressing and
         -- scanning every pages/<id>.txt file at query time.
         CREATE VIRTUAL TABLE pages_fts USING fts5(page_id UNINDEXED, title, body);
+        -- Forum-only, one row per best-effort-extracted post (see
+        -- forumPageScript.ts). Empty on any non-forum archive.
+        CREATE TABLE forum_posts (
+          post_id TEXT PRIMARY KEY,
+          page_id TEXT NOT NULL,
+          anchor TEXT NOT NULL,
+          author TEXT,
+          author_profile_url TEXT,
+          timestamp TEXT,
+          post_number INTEGER,
+          thread_key TEXT NOT NULL,
+          section_key TEXT,
+          thread_title TEXT NOT NULL,
+          section_title TEXT
+        );
+        CREATE INDEX idx_forum_posts_thread ON forum_posts(thread_key);
+        CREATE VIRTUAL TABLE forum_posts_fts USING fts5(
+          post_id UNINDEXED, author, thread_title, section_title, url, body
+        );
       `);
 
       const insertPage = db.prepare(
@@ -807,6 +917,14 @@ export class SiteArchiveBuilder {
       const insertAssetUrl = db.prepare('INSERT INTO asset_urls (url, sha256) VALUES (?,?)');
       const insertRoute = db.prepare('INSERT OR REPLACE INTO routes (normalized_url, target_type, target_id) VALUES (?,?,?)');
       const insertPageFts = db.prepare('INSERT INTO pages_fts (page_id, title, body) VALUES (?,?,?)');
+      const insertForumPost = db.prepare(
+        'INSERT INTO forum_posts (post_id, page_id, anchor, author, author_profile_url, timestamp, post_number, thread_key, section_key, thread_title, section_title) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+      );
+      const insertForumPostFts = db.prepare(
+        'INSERT INTO forum_posts_fts (post_id, author, thread_title, section_title, url, body) VALUES (?,?,?,?,?,?)',
+      );
+
+      const pageByPageId = new Map(this.pages.map((p) => [p.pageId, p]));
 
       db.transaction(() => {
         for (const p of this.pages) {
@@ -820,6 +938,23 @@ export class SiteArchiveBuilder {
         for (const r of this.routes.values()) {
           const targetId = r.target.type === 'page' ? r.target.pageId : r.target.sha256;
           insertRoute.run(r.normalizedUrl, r.target.type, targetId);
+        }
+        for (const post of this.forumPosts) {
+          insertForumPost.run(
+            post.postId,
+            post.pageId,
+            post.anchor,
+            post.author,
+            post.authorProfileUrl,
+            post.timestamp,
+            post.postNumber,
+            post.threadKey,
+            post.sectionKey,
+            post.threadTitle,
+            post.sectionTitle,
+          );
+          const url = pageByPageId.get(post.pageId)?.normalizedUrl ?? '';
+          insertForumPostFts.run(post.postId, post.author ?? '', post.threadTitle, post.sectionTitle ?? '', url, postBodies.get(post.postId) ?? '');
         }
       })();
     } finally {
@@ -862,6 +997,9 @@ export class SiteArchiveBuilder {
       totalUncompressedBytes: this.totalUncompressed,
       indexPath: index.relPath,
       indexSha256: sha256(index.buffer),
+      ...(this.forumPosts.length > 0 || input.scope.kind.startsWith('forum-')
+        ? { forumPosts: this.forumPosts, forumSummary: this.computeForumSummary() }
+        : {}),
     };
 
     const manifestJson = JSON.stringify(manifest, null, 2);

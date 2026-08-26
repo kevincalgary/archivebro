@@ -301,6 +301,18 @@ body,
   max-width: 100%;
 }
 
+.sitearchive-search-result-author {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.sitearchive-search-results-posts {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+}
+
 .sitearchive-search-result-snippet {
   font-size: 11.5px;
   color: var(--text-dim);
@@ -358,6 +370,74 @@ body,
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
+}
+
+.site-archive-history-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.site-archive-history-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bg-panel, var(--bg-input));
+}
+
+.site-archive-history-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.site-archive-history-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-solid, var(--accent));
+  color: var(--bg);
+}
+
+.site-archive-history-badge-missing {
+  background: var(--danger-solid, var(--danger));
+}
+
+.site-archive-history-url {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  word-break: break-all;
+  margin-top: 2px;
+}
+
+.site-archive-history-meta {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.site-archive-history-incomplete-reason {
+  font-size: 11.5px;
+  color: var(--danger-solid, var(--danger));
+  margin-top: 4px;
+}
+
+.site-archive-history-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .library-search {

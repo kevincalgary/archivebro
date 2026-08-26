@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { RecoverableCaptureSummary } from '../../../shared/sitearchiveTypes';
 import { Spinner } from '../Progress';
 import { useDialogA11y } from '../../hooks/useDialogA11y';
+import { scopeLabel } from './scopeLabels';
 
 interface Props {
   captures: RecoverableCaptureSummary[];
@@ -13,12 +14,6 @@ interface Props {
   onDiscard: (archiveId: string) => void;
   onDismiss: () => void;
 }
-
-const SCOPE_LABEL: Record<string, string> = {
-  'current-page': 'Current page only',
-  'entire-site': 'Entire website',
-  custom: 'Custom scope',
-};
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -72,7 +67,7 @@ function RecoveryItem({
       <div className="capture-target">
         <div className="capture-target-title">{capture.startUrl}</div>
         <div className="capture-target-url">
-          {SCOPE_LABEL[capture.scopeKind] ?? capture.scopeKind} · last activity {formatWhen(capture.lastActivityMs)}
+          {scopeLabel(capture.scopeKind)} · last activity {formatWhen(capture.lastActivityMs)}
         </div>
       </div>
 

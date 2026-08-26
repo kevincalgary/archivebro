@@ -10,7 +10,7 @@ import type {
   CaptureResult,
   SiteArchiveManifest,
 } from '../../shared/sitearchiveTypes';
-import { SiteArchiveBuilder } from './archiveWriter';
+import { SiteArchiveBuilder, sha256 } from './archiveWriter';
 import { openSiteArchive, type OpenedArchive } from './archiveReader';
 import { capturePage } from './pageCapture';
 import {
@@ -23,6 +23,7 @@ import {
   PAGE_CAPTURE_BUDGET_MS,
 } from './crawler';
 import { normalizeUrl, originOf } from './urlNormalize';
+import { threadKeyOf } from './forumLinks';
 import { logger } from '../util/logger';
 
 export type ProgressListener = (progress: CaptureProgress) => void;
@@ -72,11 +73,19 @@ export function inferDepth(discoveredOn: string | null, pageByNormalizedUrl: Map
   return parent ? parent.depth + 1 : 0;
 }
 
-/** Copy every existing page/asset/response file from the opened archive into a fresh staging tree, byte for byte. */
+/**
+ * Copy every existing page/asset/response file from the opened archive
+ * into a fresh staging tree, byte for byte. `retriedPageIds` names the
+ * pages being re-attempted -- their forum post text files are skipped
+ * here since a successful retry re-extracts them fresh and a still-
+ * failing retry has no page to extract from; everything else's post
+ * bodies are carried over so forum_posts_fts stays complete after retry.
+ */
 async function copyExistingEntriesIntoStaging(
   archive: OpenedArchive,
   manifest: SiteArchiveManifest,
   stagingDir: string,
+  retriedPageIds: ReadonlySet<string>,
 ): Promise<void> {
   for (const p of manifest.pages) {
     const html = await archive.readEntry(p.htmlPath, p.htmlSha256);
@@ -97,6 +106,20 @@ async function copyExistingEntriesIntoStaging(
   for (const r of manifest.responses) {
     const bytes = await archive.readEntry(r.path, r.sha256);
     await fs.writeFile(path.join(stagingDir, r.path), bytes);
+  }
+  for (const post of manifest.forumPosts ?? []) {
+    if (retriedPageIds.has(post.pageId)) continue;
+    const fileId = sha256(post.postId);
+    const relPath = `posts/${fileId}.txt`;
+    try {
+      const body = await archive.readEntry(relPath, null);
+      await fs.writeFile(path.join(stagingDir, relPath), body);
+    } catch {
+      // A pre-forum-feature archive, or one missing this specific post
+      // file for any reason -- forum_posts_fts just gets an empty body
+      // for this post, same graceful degradation writeIndexDatabase()
+      // already applies to a missing page text file.
+    }
   }
 }
 
@@ -146,6 +169,12 @@ export class RetryJob {
     this.listeners.push(listener);
   }
 
+  /** Retry never discovers a new thread (it only re-attempts already-known URLs), so only imagesSaved is meaningful here. */
+  private forumProgressFields(): Pick<CaptureProgress, 'imagesSaved'> {
+    if (!this.scopeKind.startsWith('forum-')) return {};
+    return { imagesSaved: this.builder?.assetCount ?? 0 };
+  }
+
   private emit(): void {
     const progress: CaptureProgress = {
       jobId: this.jobId,
@@ -160,6 +189,7 @@ export class RetryJob {
       bytesDownloaded: this.bytesDownloaded,
       warningCount: this.warningCount,
       failureCount: this.builder?.failureList.length ?? 0,
+      ...this.forumProgressFields(),
     };
     for (const l of this.listeners) l(progress);
   }
@@ -178,6 +208,7 @@ export class RetryJob {
       bytesDownloaded: this.bytesDownloaded,
       warningCount: this.warningCount,
       failureCount: this.builder?.failureList.length ?? 0,
+      ...this.forumProgressFields(),
       ...extra,
     };
     for (const l of this.listeners) l(progress);
@@ -232,6 +263,7 @@ export class RetryJob {
         assetCount: manifest.assets.length,
         fileSizeBytes: stat.size,
         failures: manifest.failures,
+        forumSummary: manifest.forumSummary,
       };
       this.emitTerminal({ state: 'completed', result });
       return result;
@@ -241,13 +273,15 @@ export class RetryJob {
     const builder = new SiteArchiveBuilder(manifest.archiveId, app.getVersion());
     this.builder = builder;
 
+    const retryingUrls = new Set(retryable.map((f) => normalizeUrl(f.url) ?? f.url));
+    const retriedPageIds = new Set(
+      manifest.pages.filter((p) => retryingUrls.has(p.normalizedUrl)).map((p) => p.pageId),
+    );
+
     try {
       await builder.init(app.getPath('temp'));
-      await copyExistingEntriesIntoStaging(archive, manifest, builder.stagingPath!);
-      builder.restoreFromManifest(
-        manifest,
-        new Set(retryable.map((f) => normalizeUrl(f.url) ?? f.url)),
-      );
+      await copyExistingEntriesIntoStaging(archive, manifest, builder.stagingPath!, retriedPageIds);
+      builder.restoreFromManifest(manifest, retryingUrls);
     } finally {
       archive.close();
     }
@@ -295,7 +329,7 @@ export class RetryJob {
       this.currentUrl = null;
       this.emit();
 
-      const { fileSizeBytes } = await builder.finalize({
+      const { fileSizeBytes, manifest: finalManifest } = await builder.finalize({
         finalPath: this.archivePath,
         startUrl: manifest.startUrl,
         startFinalUrl: manifest.startFinalUrl,
@@ -309,6 +343,7 @@ export class RetryJob {
         assetCount: builder.assetCount,
         fileSizeBytes,
         failures: builder.failureList,
+        forumSummary: finalManifest.forumSummary,
       };
       logger.info('sitearchive.retry_completed', {
         jobId: this.jobId,
@@ -385,6 +420,19 @@ export class RetryJob {
       // pause capturePageSafely() uses for a freshly-loaded page.
       await sleep(600);
 
+      // Forum identity for a retried page: threadKey is recomputable from
+      // its own URL; sectionKey isn't (a page that never succeeded before
+      // has no prior record of it), so it's inherited from whichever page
+      // discovered this one, when that page is known and was itself
+      // captured under a forum scope.
+      let forumThreadKey: string | undefined;
+      let forumSectionKey: string | undefined;
+      if (manifest.scope.kind.startsWith('forum-')) {
+        forumThreadKey = threadKeyOf(finalNormalized);
+        const parent = failure.discoveredOn ? pageByNormalizedUrl.get(normalizeUrl(failure.discoveredOn) ?? failure.discoveredOn) : undefined;
+        forumSectionKey = parent?.forumSectionKey;
+      }
+
       const result = await capturePage(
         view.webContents,
         {
@@ -403,6 +451,8 @@ export class RetryJob {
           normalizedUrl: finalNormalized,
           depth: inferDepth(failure.discoveredOn, pageByNormalizedUrl),
           redirectedFrom: finalNormalized !== normalized ? [normalized] : [],
+          forumThreadKey,
+          forumSectionKey,
         },
       );
 

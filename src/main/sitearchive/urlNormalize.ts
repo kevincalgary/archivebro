@@ -188,12 +188,24 @@ export function looksDestructive(rawUrl: string): boolean {
  */
 const NON_CONTENT_PATH_RE =
   /(^|\/)(login|log-in|signin|sign-in|register|signup|sign-up|lostpassword|lost-password|forgot-password|search|members|member|profile|profiles|account|preferences|new-thread|create-thread|post-thread|new-topic|reply|subscribe|watched|bookmarks|conversations|notifications|cart|checkout)(\/|$)/i;
+/** Same list, minus the profile-related terms -- used when `includeProfiles` is set. */
+const NON_CONTENT_PATH_NO_PROFILES_RE =
+  /(^|\/)(login|log-in|signin|sign-in|register|signup|sign-up|lostpassword|lost-password|forgot-password|search|account|preferences|new-thread|create-thread|post-thread|new-topic|reply|subscribe|watched|bookmarks|conversations|notifications|cart|checkout)(\/|$)/i;
 /** Query-driven equivalents, e.g. `?do=login` or `?action=search`. */
 const NON_CONTENT_PARAM_RE = /\b(do|action|mode|view)=(login|register|search|newthread|newreply|profile|account)\b/i;
+const NON_CONTENT_PARAM_NO_PROFILES_RE = /\b(do|action|mode|view)=(login|register|search|newthread|newreply|account)\b/i;
 
-export function looksNonContent(rawUrl: string): boolean {
+export interface LooksNonContentOptions {
+  /** When true, member/profile pages are treated as content -- used by forum-whole captures with "include user profiles" on. */
+  includeProfiles?: boolean;
+}
+
+export function looksNonContent(rawUrl: string, options: LooksNonContentOptions = {}): boolean {
   try {
     const u = new URL(rawUrl);
+    if (options.includeProfiles) {
+      return NON_CONTENT_PATH_NO_PROFILES_RE.test(u.pathname) || NON_CONTENT_PARAM_NO_PROFILES_RE.test(u.search);
+    }
     return NON_CONTENT_PATH_RE.test(u.pathname) || NON_CONTENT_PARAM_RE.test(u.search);
   } catch {
     return false;
@@ -254,7 +266,7 @@ export function extensionOf(rawUrl: string): string {
   }
 }
 
-const DOCUMENT_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf', 'csv', 'txt', 'zip']);
+export const DOCUMENT_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf', 'csv', 'txt', 'zip']);
 const MEDIA_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'mp3', 'wav', 'ogg', 'oga', 'flac', 'aac', 'm4a']);
 
 export function isDocumentUrl(rawUrl: string): boolean {

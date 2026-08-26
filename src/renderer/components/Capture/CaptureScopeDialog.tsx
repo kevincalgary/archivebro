@@ -1,18 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { CaptureScope, CaptureScopeKind } from '../../../shared/sitearchiveTypes';
 import { useDialogA11y } from '../../hooks/useDialogA11y';
 import {
   DEFAULT_CAPTURE_SCOPE,
   DEFAULT_SITE_SCOPE,
+  DEFAULT_FORUM_THREAD_SCOPE,
+  DEFAULT_FORUM_SECTION_SCOPE,
+  DEFAULT_FORUM_WHOLE_SCOPE,
   SCOPE_SOFT_LIMITS,
 } from '../../../shared/sitearchiveTypes';
 
 interface Props {
+  tabId: string;
   pageUrl: string;
   pageTitle: string;
   host: string;
   onCancel: () => void;
   onStart: (scope: CaptureScope) => void;
+}
+
+const FORUM_KINDS: CaptureScopeKind[] = ['forum-thread', 'forum-section', 'forum-whole'];
+function isForumKind(kind: CaptureScopeKind): boolean {
+  return FORUM_KINDS.includes(kind);
 }
 
 function formatMb(bytes: number | null): number | '' {
@@ -31,17 +40,49 @@ function describeLimit(value: number | null, unit: string): string {
   return value === null ? `unlimited ${unit}` : `${value} ${unit}`;
 }
 
-export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel, onStart }: Props) {
+export default function CaptureScopeDialog({ tabId, pageUrl, pageTitle, host, onCancel, onStart }: Props) {
   const [kind, setKind] = useState<CaptureScopeKind>('current-page');
   const [custom, setCustom] = useState<CaptureScope>({ ...DEFAULT_SITE_SCOPE, kind: 'custom' });
+  const [forumScope, setForumScope] = useState<CaptureScope>(DEFAULT_FORUM_THREAD_SCOPE);
   const [confirmedOverLimit, setConfirmedOverLimit] = useState(false);
+  const [confirmedForumWarning, setConfirmedForumWarning] = useState(false);
+  const [forumEstimate, setForumEstimate] = useState<{ estimatedThreads: number | null; note: string } | null>(null);
+  const [estimateLoading, setEstimateLoading] = useState(false);
 
   const scope: CaptureScope =
     kind === 'current-page'
       ? { ...DEFAULT_CAPTURE_SCOPE, kind: 'current-page' }
       : kind === 'entire-site'
         ? { ...DEFAULT_SITE_SCOPE, kind: 'entire-site' }
-        : custom;
+        : isForumKind(kind)
+          ? { ...forumScope, kind }
+          : custom;
+
+  // Pre-flight estimate for the two forum scopes that can reach more than
+  // one thread. Re-fetched whenever the forum kind changes; always framed
+  // as an approximation, never a promise -- see estimateForumLinkCount().
+  useEffect(() => {
+    if (kind !== 'forum-section' && kind !== 'forum-whole') {
+      setForumEstimate(null);
+      return;
+    }
+    let cancelled = false;
+    setEstimateLoading(true);
+    window.archiveBrowser.siteCapture
+      .estimate(tabId, kind)
+      .then((info) => {
+        if (!cancelled) setForumEstimate(info.forumEstimate ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setForumEstimate(null);
+      })
+      .finally(() => {
+        if (!cancelled) setEstimateLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, tabId]);
 
   // Anything past the soft limits -- including removing a limit entirely --
   // needs an explicit acknowledgement, since a deep/wide crawl can take a
@@ -53,10 +94,15 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
     (scope.maxPages ?? 0) > SCOPE_SOFT_LIMITS.maxPages ||
     (scope.maxTotalBytes ?? 0) > SCOPE_SOFT_LIMITS.maxTotalBytes;
 
-  const canStart = !exceedsSoftLimits || confirmedOverLimit;
+  const canStart = (!exceedsSoftLimits || confirmedOverLimit) && (!isForumKind(kind) || confirmedForumWarning);
 
-  const estimate =
-    kind === 'current-page'
+  const estimate = isForumKind(kind)
+    ? kind === 'forum-thread'
+      ? 'Every page of this thread only -- no other threads.'
+      : kind === 'forum-section'
+        ? `This section's threads and pagination, up to ${scope.maxPages === null ? 'no page limit' : `${scope.maxPages} pages`}. Other sections are not included.`
+        : `Every public section and thread on ${host || 'this forum'}, subject to the limits below.`
+    : kind === 'current-page'
       ? 'Just this one page.'
       : `${scope.maxPages === null ? 'Every reachable page' : `Up to ${scope.maxPages} page${scope.maxPages === 1 ? '' : 's'}`}` +
         ` on ${host || 'this site'}, ` +
@@ -66,6 +112,22 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
   function patch(p: Partial<CaptureScope>) {
     setCustom((c) => ({ ...c, ...p, kind: 'custom' }));
     setConfirmedOverLimit(false);
+  }
+
+  function patchForum(p: Partial<CaptureScope>) {
+    setForumScope((c) => ({ ...c, ...p }));
+    setConfirmedOverLimit(false);
+  }
+
+  function selectForumKind(next: 'forum-thread' | 'forum-section' | 'forum-whole') {
+    setKind(next);
+    setForumScope((c) => ({
+      ...(next === 'forum-thread' ? DEFAULT_FORUM_THREAD_SCOPE : next === 'forum-section' ? DEFAULT_FORUM_SECTION_SCOPE : DEFAULT_FORUM_WHOLE_SCOPE),
+      // Preserve any toggles the user already set while switching between forum kinds.
+      forumIncludeProfiles: c.forumIncludeProfiles,
+      forumDownloadAttachments: c.forumDownloadAttachments,
+      forumAttemptExternalImages: c.forumAttemptExternalImages,
+    }));
   }
 
   const dialogRef = useDialogA11y(onCancel);
@@ -113,6 +175,33 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
             <div>
               <strong>Custom scope</strong>
               <span>Choose exactly how far to go.</span>
+            </div>
+          </label>
+
+          <label className={kind === 'forum-thread' ? 'scope-choice scope-choice-active' : 'scope-choice'}>
+            <input type="radio" name="scope" checked={kind === 'forum-thread'} onChange={() => selectForumKind('forum-thread')} />
+            <div>
+              <strong>This forum thread</strong>
+              <span>Every page of this thread's pagination, posts, images and attachments. No other threads.</span>
+            </div>
+          </label>
+
+          <label className={kind === 'forum-section' ? 'scope-choice scope-choice-active' : 'scope-choice'}>
+            <input type="radio" name="scope" checked={kind === 'forum-section'} onChange={() => selectForumKind('forum-section')} />
+            <div>
+              <strong>This forum section</strong>
+              <span>This section's pagination and every thread listed in it. Other sections are not included.</span>
+            </div>
+          </label>
+
+          <label className={kind === 'forum-whole' ? 'scope-choice scope-choice-active' : 'scope-choice'}>
+            <input type="radio" name="scope" checked={kind === 'forum-whole'} onChange={() => selectForumKind('forum-whole')} />
+            <div>
+              <strong>Entire forum</strong>
+              <span>
+                Every public section and thread on <code>{host}</code>, subject to the limits below. Can take a long
+                time and a lot of disk space on a large forum.
+              </span>
             </div>
           </label>
         </fieldset>
@@ -231,7 +320,91 @@ export default function CaptureScopeDialog({ pageUrl, pageTitle, host, onCancel,
           </div>
         )}
 
+        {isForumKind(kind) && (
+          <div className="custom-scope">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={forumScope.forumIncludeProfiles ?? false}
+                onChange={(e) => patchForum({ forumIncludeProfiles: e.target.checked })}
+              />
+              Follow links to member/author profile pages
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={forumScope.forumDownloadAttachments ?? true}
+                onChange={(e) => patchForum({ forumDownloadAttachments: e.target.checked })}
+              />
+              Download attachments (files linked from posts)
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={forumScope.forumAttemptExternalImages ?? true}
+                onChange={(e) => patchForum({ forumAttemptExternalImages: e.target.checked })}
+              />
+              Attempt images hosted on other sites
+            </label>
+            {kind !== 'forum-thread' && (
+              <>
+                <label className="field-row">
+                  Maximum pages
+                  <input
+                    type="number"
+                    min={1}
+                    max={50000}
+                    placeholder="No limit"
+                    value={forumScope.maxPages ?? ''}
+                    onChange={(e) => patchForum({ maxPages: parseLimit(e.target.value) })}
+                  />
+                </label>
+                <label className="field-row">
+                  Maximum archive size (MB)
+                  <input
+                    type="number"
+                    min={1}
+                    placeholder="No limit"
+                    value={formatMb(forumScope.maxTotalBytes)}
+                    onChange={(e) => {
+                      const mb = parseLimit(e.target.value);
+                      patchForum({ maxTotalBytes: mb === null ? null : Math.max(1, mb) * 1024 * 1024 });
+                    }}
+                  />
+                </label>
+              </>
+            )}
+            <label className="field-row">
+              Request delay (ms)
+              <input
+                type="number"
+                min={0}
+                max={10000}
+                value={forumScope.crawlDelayMs}
+                onChange={(e) => patchForum({ crawlDelayMs: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+        )}
+
         <p className="capture-estimate">{estimate}</p>
+
+        {isForumKind(kind) && (kind === 'forum-section' || kind === 'forum-whole') && (
+          <p className="capture-estimate">
+            {estimateLoading ? 'Estimating…' : (forumEstimate?.note ?? 'Estimate unavailable for this page.')}
+          </p>
+        )}
+
+        {isForumKind(kind) && (
+          <label className="over-limit-warning">
+            <input type="checkbox" checked={confirmedForumWarning} onChange={(e) => setConfirmedForumWarning(e.target.checked)} />
+            <span>
+              If this content requires your account to view, sharing this archive with anyone else could give them
+              access to it too. Only proceed if you're comfortable with everyone you might share this archive with
+              seeing what's captured. Continue.
+            </span>
+          </label>
+        )}
 
         {exceedsSoftLimits && (
           <label className="over-limit-warning">

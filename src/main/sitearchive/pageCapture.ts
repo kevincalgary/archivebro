@@ -1,7 +1,7 @@
 import type { WebContents, Session } from 'electron';
 import crypto from 'node:crypto';
 import type { SiteArchiveBuilder } from './archiveWriter';
-import type { CaptureScope } from '../../shared/sitearchiveTypes';
+import type { CaptureScope, ForumPostEntry } from '../../shared/sitearchiveTypes';
 import { ARCHIVE_SITE_SCHEME } from './constants';
 import {
   CLEANUP_LIVE_ATTRS_SCRIPT,
@@ -12,9 +12,10 @@ import {
   restoreScrollScript,
   serializeDomScript,
 } from './pageScript';
+import { DETECT_FORUM_POSTS_SCRIPT } from './forumPageScript';
 import { captureElementScreenshots, unavailableImagePlaceholder, type FallbackCandidate } from './imageFallback';
 import { fetchResource } from './resourceFetcher';
-import { isDocumentUrl, isMediaUrl, isInScope, normalizeUrl, hostOf } from './urlNormalize';
+import { isDocumentUrl, isMediaUrl, isInScope, normalizeUrl, hostOf, originOf } from './urlNormalize';
 import { captureFullPageScreenshot } from '../capture/screenshotCapture';
 import { sampleCaptureMemory } from '../capture/memoryTelemetry';
 import { logger } from '../util/logger';
@@ -85,7 +86,17 @@ interface CollectedResources {
 export async function capturePage(
   webContents: WebContents,
   ctx: PageCaptureContext,
-  input: { originalUrl: string; finalUrl: string; normalizedUrl: string; depth: number; redirectedFrom: string[] },
+  input: {
+    originalUrl: string;
+    finalUrl: string;
+    normalizedUrl: string;
+    depth: number;
+    redirectedFrom: string[];
+    /** Forum identity, set by the crawler only when ctx.scope.kind is a forum-* kind. */
+    forumThreadKey?: string;
+    forumSectionKey?: string;
+    forumPageIndex?: number;
+  },
 ): Promise<PageCaptureResult> {
   const warnings: string[] = [];
   let bytesDownloaded = 0;
@@ -143,6 +154,23 @@ export async function capturePage(
       // Respect the user's scope choices for heavy content types.
       if (!ctx.scope.includeMedia && (resource.kind === 'media' || isMediaUrl(resource.url))) return false;
       if (!ctx.scope.includeDocuments && isDocumentUrl(resource.url)) return false;
+      // Attachments (forum-only resource kind) default to on, but the
+      // toggle exists specifically so a user can opt out of downloading
+      // potentially large/unwanted files linked from posts.
+      if (resource.kind === 'attachment' && ctx.scope.forumDownloadAttachments === false) return false;
+      // Cross-origin images (a CDN, or images hosted on a different site
+      // entirely -- common on forum posts) are fetched by default, same
+      // as an ordinary site capture always has. The forum-only toggle
+      // exists to turn that off; a skipped image still gets the usual
+      // screenshot-fallback treatment below rather than vanishing.
+      if (
+        resource.kind === 'image' &&
+        ctx.scope.kind.startsWith('forum-') &&
+        ctx.scope.forumAttemptExternalImages === false &&
+        originOf(resource.url) !== ctx.startOrigin
+      ) {
+        return false;
+      }
       return true;
     });
 
@@ -308,7 +336,21 @@ export async function capturePage(
       screenshot,
       text,
       redirectedFrom: input.redirectedFrom,
+      forumThreadKey: input.forumThreadKey,
+      forumSectionKey: input.forumSectionKey,
+      forumPageIndex: input.forumPageIndex,
     });
+
+    // Best-effort per-post extraction, forum scopes only -- never runs,
+    // and costs nothing, for an ordinary page/site capture.
+    if (input.forumThreadKey && ctx.scope.kind.startsWith('forum-')) {
+      await capturePostsForIndex(webContents, ctx, {
+        pageId,
+        threadKey: input.forumThreadKey,
+        sectionKey: input.forumSectionKey ?? null,
+        threadTitle: collected.title || input.finalUrl,
+      });
+    }
 
     return {
       pageId,
@@ -342,6 +384,46 @@ export async function capturePage(
     await safeEval(webContents, CLEANUP_LIVE_ATTRS_SCRIPT).catch(() => null);
     // ...including their scroll position, even if capture failed.
     await safeEval(webContents, restoreScrollScript(originalScroll.x, originalScroll.y)).catch(() => null);
+  }
+}
+
+interface RawForumPost {
+  anchor: string;
+  author: string | null;
+  authorProfileUrl: string | null;
+  timestamp: string | null;
+  postNumber: number | null;
+  text: string;
+}
+
+/**
+ * Best-effort forum post detection for the page just captured. Never
+ * throws -- a page with no recognizable post markup, or a script that
+ * fails for any reason, simply contributes zero post entries; the page is
+ * still fully indexed at whole-page granularity via pages_fts.
+ */
+async function capturePostsForIndex(
+  webContents: WebContents,
+  ctx: PageCaptureContext,
+  page: { pageId: string; threadKey: string; sectionKey: string | null; threadTitle: string },
+): Promise<void> {
+  const raw = await safeEval<RawForumPost[]>(webContents, DETECT_FORUM_POSTS_SCRIPT);
+  if (!raw || raw.length === 0) return;
+  for (const post of raw) {
+    const entry: ForumPostEntry = {
+      postId: `${page.pageId}#${post.anchor}`,
+      pageId: page.pageId,
+      anchor: post.anchor,
+      author: post.author,
+      authorProfileUrl: post.authorProfileUrl,
+      timestamp: post.timestamp,
+      postNumber: post.postNumber,
+      threadKey: page.threadKey,
+      sectionKey: page.sectionKey,
+      threadTitle: page.threadTitle,
+      sectionTitle: null,
+    };
+    await ctx.builder.addForumPost(entry, post.text);
   }
 }
 

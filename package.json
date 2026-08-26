@@ -1,6 +1,6 @@
 {
   "name": "archive-browser",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A local-first desktop browser that automatically archives every page you visit for offline review.",
   "private": true,
   "main": "dist/main/index.js",
@@ -43,7 +43,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
-    "@electron/rebuild": "^3.7.0",
+    "@electron/rebuild": "^4.2.0",
     "@playwright/test": "^1.48.0",
     "@types/archiver": "^8.0.0",
     "@types/better-sqlite3": "^7.6.11",
@@ -60,6 +60,6 @@
     "nodemon": "^3.1.7",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.11"
   }
 }

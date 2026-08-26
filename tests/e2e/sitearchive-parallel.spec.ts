@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { launchApp, navigateViaAddressBar, type AppHandle } from './helpers';
+import { launchApp, navigateViaAddressBar, waitForTabs, type AppHandle } from './helpers';
 import { withSiteFixture, siteHooks, siteScope } from './sitearchive-helpers';
 import { openSiteArchive } from '../../src/main/sitearchive/archiveReader';
 
@@ -37,6 +37,7 @@ test.describe('parallel site capture', () => {
   test('concurrency > 1 captures the same page budget in meaningfully less wall-clock time', async () => {
     await withSiteFixture(async (fixture) => {
       await navigateViaAddressBar(handle, fixture.url);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${fixture.url}/`);
       const hooks = siteHooks(handle.app);
       const tabId = await activeTabId();
 
@@ -76,6 +77,7 @@ test.describe('parallel site capture', () => {
   test('concurrent workers fetching identical bytes under different URLs dedupe to one entry with every source URL kept', async () => {
     await withSiteFixture(async (fixture) => {
       await navigateViaAddressBar(handle, fixture.url);
+      await waitForTabs(handle.app, (t) => t[0]?.url === `${fixture.url}/`);
       const hooks = siteHooks(handle.app);
       const tabId = await activeTabId();
       const outputPath = path.join(outDir, 'concurrent-dedup.sitearchive');

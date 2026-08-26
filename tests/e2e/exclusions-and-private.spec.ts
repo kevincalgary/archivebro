@@ -26,6 +26,18 @@ test.describe('domain exclusions and private browsing', () => {
     });
   });
 
+  test('turning off automatic archiving in Settings actually stops captures', async () => {
+    await withFixtureServer(async (base) => {
+      await testHooks(handle.app).updateSettings({ autoCaptureEnabled: false });
+
+      await navigateViaAddressBar(handle, `${base}/`);
+      await handle.window.waitForTimeout(1500); // longer than the capture delay, to prove nothing gets written
+
+      const { items } = await testHooks(handle.app).queryArchives({ sort: 'newest', limit: 50, offset: 0 });
+      expect(items.some((i) => i.finalUrl === `${base}/`)).toBe(false);
+    });
+  });
+
   test('pausing automatic archiving on a tab stops captures for that tab', async () => {
     await withFixtureServer(async (base) => {
       await navigateViaAddressBar(handle, `${base}/`);

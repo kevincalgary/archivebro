@@ -144,6 +144,10 @@ export class CaptureService {
       this.emit(nav.tabId, 'skipped-excluded'); // reuse status; UI shows "paused" via tab state separately
       return;
     }
+    if (!settings.autoCaptureEnabled) {
+      this.emit(nav.tabId, 'skipped-excluded'); // reuse status, same as the per-tab pause above
+      return;
+    }
     if (this.settings.isDomainExcluded(domain)) {
       this.emit(nav.tabId, 'skipped-excluded');
       return;

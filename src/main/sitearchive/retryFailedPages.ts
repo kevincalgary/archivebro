@@ -43,6 +43,7 @@ const RETRYABLE_PAGE_FAILURE_KINDS: ReadonlySet<CaptureFailureKind> = new Set([
   'timeout',
   'too-large',
   'redirect-loop',
+  'render-process-gone',
   'render-failed',
   'serialize-failed',
   'disk-full',

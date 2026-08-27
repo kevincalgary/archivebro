@@ -269,6 +269,8 @@ export type CaptureFailureKind =
   /** The crawl hit a scope limit with pages still queued. */
   | 'stopped-at-limit'
   | 'redirect-loop'
+  /** The page's renderer process died mid-navigation (crash, kill, or OOM) rather than failing normally. */
+  | 'render-process-gone'
   | 'render-failed'
   | 'serialize-failed'
   /** A write ran out of disk space (ENOSPC), even after retrying -- recoverable by freeing space and using "Retry failed pages". */

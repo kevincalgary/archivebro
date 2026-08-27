@@ -1,4 +1,5 @@
 import { app, type ProcessMetric, type WebContents } from 'electron';
+import os from 'node:os';
 
 /**
  * Per-page memory telemetry for a site capture.
@@ -22,6 +23,16 @@ export interface MemorySample {
   rendererBytes: number | null;
   /** The renderer's peak resident memory since it started, or null. */
   rendererPeakBytes: number | null;
+  /**
+   * Whole-machine free memory (`os.freemem()`), not just this process's own
+   * RSS -- the 151-minute crash died with no crash report, which is what a
+   * kernel OOM-kill (an unblockable SIGKILL, invisible to any in-process
+   * handler) looks like. Per-process RSS alone can't tell "this process
+   * grew" apart from "the whole machine was starved by something else
+   * entirely" (another renderer, the GPU process, /dev/shm); this can.
+   */
+  systemFreeBytes: number;
+  systemTotalBytes: number;
 }
 
 /**
@@ -65,5 +76,7 @@ export function sampleCaptureMemory(webContents: WebContents): MemorySample {
     mainHeapUsedBytes: main.heapUsed,
     rendererBytes: renderer?.bytes ?? null,
     rendererPeakBytes: renderer?.peakBytes ?? null,
+    systemFreeBytes: os.freemem(),
+    systemTotalBytes: os.totalmem(),
   };
 }

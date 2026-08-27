@@ -14,7 +14,7 @@ function failure(overrides: Partial<CaptureFailureEntry> = {}): CaptureFailureEn
 
 describe('retryableFailures', () => {
   it('keeps genuine page-capture-attempt failures', () => {
-    const kinds = ['fetch-failed', 'http-error', 'timeout', 'too-large', 'redirect-loop', 'render-failed', 'serialize-failed', 'disk-full', 'interrupted'] as const;
+    const kinds = ['fetch-failed', 'http-error', 'timeout', 'too-large', 'redirect-loop', 'render-process-gone', 'render-failed', 'serialize-failed', 'disk-full', 'interrupted'] as const;
     const failures = kinds.map((kind, i) => failure({ kind, url: `https://example.com/${i}` }));
     const result = retryableFailures(failures);
     expect(result.map((f) => f.kind).sort()).toEqual([...kinds].sort());

@@ -673,6 +673,8 @@ export class CaptureJob {
       pagesCompleted: this.pagesCompleted,
       rendererBytesBeforeRecycle: memory?.rendererBytes ?? null,
       rendererPeakBytesBeforeRecycle: memory?.rendererPeakBytes ?? null,
+      systemFreeBytes: memory?.systemFreeBytes ?? null,
+      systemTotalBytes: memory?.systemTotalBytes ?? null,
     });
     this.destroyView(workerIndex);
     // Let the old renderer process actually go away before starting another.
@@ -767,6 +769,10 @@ export class CaptureJob {
           message: loaded.message,
           discoveredOn: item.discoveredOn,
         });
+        // The webContents object is now backed by a dead OS process --
+        // force this worker's view to be rebuilt before its next page
+        // instead of leaving the outer loop to reuse a corpse.
+        if (loaded.kind === 'render-process-gone') this.workers[workerIndex]!.forceViewRecycle = true;
         return null;
       }
 
@@ -1124,6 +1130,7 @@ export function loadUrl(
       webContents.removeListener('did-finish-load', onFinish);
       webContents.removeListener('did-fail-load', onFail);
       webContents.removeListener('did-redirect-navigation', onRedirect);
+      webContents.removeListener('render-process-gone', onRenderProcessGone);
     };
     const finish = (value: { ok: true } | { ok: false; kind: CaptureFailureEntry['kind']; message: string }) => {
       if (settled) return;
@@ -1161,10 +1168,26 @@ export function loadUrl(
       }
       seenRedirects.add(norm);
     };
+    // Without this, a renderer killed mid-navigation (crash, or Chromium's
+    // own out-of-memory kill) fires none of the listeners above -- the
+    // promise just sits until PAGE_LOAD_TIMEOUT_MS and gets recorded as a
+    // generic 'timeout', which is exactly the blind spot that left the
+    // 151-minute landrover.ca crash's cause unidentified (see Known
+    // Limitations / memoryTelemetry.ts). `details.reason` is one of
+    // Electron's RenderProcessGoneDetails reasons ('oom', 'crashed',
+    // 'killed', 'launch-failed', etc.) and is recorded verbatim.
+    const onRenderProcessGone = (_e: unknown, details: { reason: string; exitCode: number }) => {
+      finish({
+        ok: false,
+        kind: 'render-process-gone',
+        message: `Renderer process gone: ${details.reason} (exit code ${details.exitCode})`,
+      });
+    };
 
     webContents.on('did-finish-load', onFinish);
     webContents.on('did-fail-load', onFail);
     webContents.on('did-redirect-navigation', onRedirect);
+    webContents.on('render-process-gone', onRenderProcessGone);
 
     webContents.loadURL(url).catch((err: unknown) => {
       finish({ ok: false, kind: 'fetch-failed', message: describe(err) });

@@ -377,6 +377,8 @@ export async function capturePage(
       mainHeapUsedBytes: memory.mainHeapUsedBytes,
       rendererBytes: memory.rendererBytes,
       rendererPeakBytes: memory.rendererPeakBytes,
+      systemFreeBytes: memory.systemFreeBytes,
+      systemTotalBytes: memory.systemTotalBytes,
     });
 
     // Remove the bookkeeping attributes we stamped onto the live page, so

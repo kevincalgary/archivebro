@@ -2,6 +2,8 @@
 
 A local-first desktop browser for macOS, Windows, and Linux that automatically saves a durable, searchable, offline copy of every page you actually visit — no account, no cloud service, nothing sent anywhere except one disclosed exception: a periodic, on-by-default check against GitHub Releases for a newer version (see "Auto-update").
 
+Current version: **0.3.3** — see [Version history](#version-history) for what changed in every release.
+
 ## Why
 
 Normal browser history is a list of URLs, not the pages themselves. Pages change, go offline, or end up behind logins you no longer have. Archive Browser captures what you actually saw — a full-page screenshot, the complete MHTML snapshot, and the extracted text — at the moment you visited, and keeps it on your disk, in a format you can open years later with no network connection.
@@ -539,6 +541,27 @@ One test remains a proven environment artifact, not an app defect: `sitearchive-
 1. **Code signing + notarization** for macOS, code signing for Windows, so builds can be distributed publicly without OS warnings — and so auto-update can actually work on macOS at all.
 2. **Run the built Windows installer/portable exe on real Windows hardware** and fix whatever that surfaces. Still blocked on producing that installer/portable exe at all in this environment: both targets compile through `makensis.exe`, a 32-bit x86 Windows binary, and this sandbox is ARM64 Linux with no `wine32` package available for that architecture at any layer (confirmed: installing `wine`/`wine64` and invoking it directly fails with "not supported on this system"). The unpacked `--dir` build (a real, verified PE32+ executable, both x64 and arm64) still works and was handed off as a zip for manual testing — needs real Windows, an x64 Linux box, or CI to produce the actual installer/portable artifacts.
 3. **Run the live `rangerovers.net` manual/optional pass** described above, now that the feature itself is done — small controlled capture (public index → one section → one multi-page thread), respecting `robots.txt`, a conservative rate, and no sign-in/account actions.
+
+## Version history
+
+`package.json`'s `version` is bumped in the same commit as the change it belongs to (see the repo's commit log for full detail on any entry below — this is a scannable summary, not a replacement for it).
+
+- **0.3.3** — Added this Version history section, since GitHub's own repo view doesn't surface per-version changes (`package.json`'s `version` field) anywhere on its own — every prior entry below was reconstructed from the git log to backfill it.
+- **0.3.2** — Fixed the Settings **"Automatic archiving"** toggle: it was stored and shown in the UI but never actually consulted, so turning it off silently kept archiving every page anyway. Also fixed a flaky parallel-capture test (`sitearchive-parallel.spec.ts`) that started a capture before its navigation had landed. See [Known limitations](#known-limitations).
+- **0.3.1** — Bumped the toolchain's required Node version to 22.12+ (`.nvmrc`, `package.json#engines`) to match what Electron 43 and `better-sqlite3` already require — a mismatch that only broke native-module loading outside Electron's own bundled runtime (e.g. Playwright's test process), not the packaged app itself. See "Native module note" under [Packaging](#packaging).
+- **0.3.0** — Added real `ENOSPC` (disk-full) retry-with-backoff for mid-capture writes, with a distinct `disk-full` failure kind that's retryable via "Retry failed pages"; and a general **Custom scope** "always include these paths" allowlist (`CaptureScope.allowedNonContentPaths`) so a link that would otherwise be skipped as non-content (e.g. `/search`) can be captured anyway. See [Known limitations](#known-limitations).
+- **0.2.2** — Resolved all `devDependency`-only `npm audit` advisories (10 advisories, 2 critical, all transitive via `@electron/rebuild` and `vitest`'s bundled tooling — never reached a packaged build). See [Dependency and Electron update cadence](#dependency-and-electron-update-cadence).
+- **0.2.1** — Documented and verified Linux support: added `package:linux`/`package:linux:dist` npm scripts for the `electron-builder.yml` target that already existed, and actually built + launched a real `.AppImage`. See [Packaging](#packaging).
+- **0.2.0** — Added **Save Forum**: three forum-aware capture scopes (thread / section / whole forum) on top of the existing `.sitearchive` crawler, with pagination handling, best-effort post extraction and search, attachment/avatar capture, a persistent Saved Sites & Forums history list, and `robots.txt` support. See [Forum capture (`Save Forum`)](#forum-capture-save-forum).
+- **0.1.0** — Initial release, built incrementally as a series of features before per-push version bumps began:
+  - Secure three-tier browser shell (trusted chrome, sandboxed browsing tabs, network-blocked offline viewer) with automatic per-page capture (MHTML + full-page screenshot + extracted text) to a local SQLite-catalogued library.
+  - Portable `.sitearchive` capture and offline browsing — current-page, entire-site, and custom scopes; the image screenshot fallback; permission prompting; progress feedback throughout.
+  - Crash-recovery journal, crawl frontier, and per-page capture time budget for site archiving, plus a startup UI to finish/resume/discard an interrupted capture.
+  - Per-page memory telemetry and per-page capture integrity hashing (SHA-256, verified on every read).
+  - Packaged app icon; CI dependency audit; `electron-updater` auto-update wiring (gated on packaging, never auto-installs).
+  - Parallel crawling (`scope.concurrency`), full-text search inside an open `.sitearchive`, and resume-only retry of a finished capture's failed pages.
+  - Library search ranked by relevance with highlighted snippets; whole-library export/import for migrating between machines.
+  - An accessibility pass on the trusted UI (focus trapping, ARIA live regions, contrast fixes); true multi-window support (`File → New Window`).
 
 ---
 

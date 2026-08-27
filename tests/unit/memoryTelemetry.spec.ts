@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findRendererMemory } from '../../src/main/capture/memoryTelemetry';
+import { findRendererMemory, findGpuProcessMemory } from '../../src/main/capture/memoryTelemetry';
 import type { ProcessMetric } from 'electron';
 
 /**
@@ -10,10 +10,15 @@ import type { ProcessMetric } from 'electron';
  * which all run real crawls with this telemetry wired in.
  */
 
-function metric(pid: number, workingSetSizeKb: number, peakWorkingSetSizeKb = workingSetSizeKb): ProcessMetric {
+function metric(
+  pid: number,
+  workingSetSizeKb: number,
+  peakWorkingSetSizeKb = workingSetSizeKb,
+  type: ProcessMetric['type'] = 'Tab',
+): ProcessMetric {
   return {
     pid,
-    type: 'Tab',
+    type,
     cpu: { percentCPUUsage: 0, idleWakeupsPerSecond: 0 },
     creationTime: Date.now(),
     memory: { workingSetSize: workingSetSizeKb, peakWorkingSetSize: peakWorkingSetSizeKb },
@@ -41,5 +46,21 @@ describe('findRendererMemory', () => {
     // this crawl cares about. Matching must be by pid, not by position.
     const metrics = [metric(1, 50_000), metric(2, 80_000), metric(3, 120_000)];
     expect(findRendererMemory(metrics, 3)).toEqual({ bytes: 120_000 * 1024, peakBytes: 120_000 * 1024 });
+  });
+});
+
+describe('findGpuProcessMemory', () => {
+  it('finds the single GPU process by type, not position', () => {
+    const metrics = [metric(1, 50_000, 50_000, 'Browser'), metric(2, 30_000, 45_000, 'GPU'), metric(3, 120_000, 120_000, 'Tab')];
+    expect(findGpuProcessMemory(metrics)).toEqual({ bytes: 30_000 * 1024, peakBytes: 45_000 * 1024 });
+  });
+
+  it('returns null when no GPU process is present in the metrics', () => {
+    const metrics = [metric(1, 50_000, 50_000, 'Browser'), metric(2, 120_000, 120_000, 'Tab')];
+    expect(findGpuProcessMemory(metrics)).toBeNull();
+  });
+
+  it('returns null for an empty metrics list', () => {
+    expect(findGpuProcessMemory([])).toBeNull();
   });
 });

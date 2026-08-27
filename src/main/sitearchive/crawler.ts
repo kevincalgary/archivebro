@@ -673,6 +673,8 @@ export class CaptureJob {
       pagesCompleted: this.pagesCompleted,
       rendererBytesBeforeRecycle: memory?.rendererBytes ?? null,
       rendererPeakBytesBeforeRecycle: memory?.rendererPeakBytes ?? null,
+      gpuBytesBeforeRecycle: memory?.gpuBytes ?? null,
+      gpuPeakBytesBeforeRecycle: memory?.gpuPeakBytes ?? null,
       systemFreeBytes: memory?.systemFreeBytes ?? null,
       systemTotalBytes: memory?.systemTotalBytes ?? null,
     });

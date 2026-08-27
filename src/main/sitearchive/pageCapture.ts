@@ -377,6 +377,8 @@ export async function capturePage(
       mainHeapUsedBytes: memory.mainHeapUsedBytes,
       rendererBytes: memory.rendererBytes,
       rendererPeakBytes: memory.rendererPeakBytes,
+      gpuBytes: memory.gpuBytes,
+      gpuPeakBytes: memory.gpuPeakBytes,
       systemFreeBytes: memory.systemFreeBytes,
       systemTotalBytes: memory.systemTotalBytes,
     });
